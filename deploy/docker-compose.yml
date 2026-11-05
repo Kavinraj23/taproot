@@ -1,0 +1,48 @@
+# Taproot's own stack. The OpenTelemetry demo is added in M1.
+# Redpanda is separate from the demo's Kafka so monitoring doesn't share its failure modes.
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.3.11
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --memory=512M
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://localhost:9092
+    ports: ["9092:9092"]
+    volumes: ["redpanda-data:/var/lib/redpanda/data"]
+    mem_limit: 1g
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    ports: ["8123:8123", "9000:9000"]
+    volumes: ["clickhouse-data:/var/lib/clickhouse"]
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    mem_limit: 1g
+
+  postgres:
+    image: postgres:16.6
+    environment:
+      POSTGRES_USER: taproot
+      POSTGRES_PASSWORD: taproot
+      POSTGRES_DB: taproot
+    ports: ["5433:5432"]  # 5433 so it doesn't clash with the demo's Postgres
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
+    mem_limit: 256m
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    ports: ["3001:3000"]  # 3001 so it doesn't clash with the demo's Grafana
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    mem_limit: 256m
+
+volumes:
+  redpanda-data:
+  clickhouse-data:
+  postgres-data:
+  grafana-data:
