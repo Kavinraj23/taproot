@@ -1,0 +1,21 @@
+# Taproot's override for the OpenTelemetry demo (3.1.0), layered on with -f by scripts/up.sh.
+#
+# product-catalog and checkout ship with a 20M limit and GOMEMLIMIT=16MiB. On this setup their
+# heap sits at the Go limit, the garbage collector runs nonstop, and they never turn healthy
+# (/api/products returns 500). Raising both fixes it for ~88 MiB more.
+# See docs/experiments/2026-11-04-memory-check.md.
+services:
+  product-catalog:
+    environment:
+      - GOMEMLIMIT=48MiB
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+  checkout:
+    environment:
+      - GOMEMLIMIT=48MiB
+    deploy:
+      resources:
+        limits:
+          memory: 64M

@@ -48,6 +48,34 @@ services:
     ulimits:
       nofile: { soft: 262144, hard: 262144 }
     mem_limit: 1g
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--user", "taproot", "--password", "taproot", "-q", "SELECT 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # Reads CPU from /proc/stat. Inside a container that's the Docker VM's CPU (not Windows').
+  # M2's discovery will add pid: host and the Docker socket.
+  agent:
+    build: { context: .., dockerfile: deploy/Dockerfile, args: { CMD: agent } }
+    hostname: docker-vm # stable series name across container recreations
+    environment:
+      TAPROOT_BROKERS: redpanda:29092
+    depends_on:
+      redpanda-init: { condition: service_completed_successfully }
+    restart: unless-stopped
+    mem_limit: 64m
+
+  processor:
+    build: { context: .., dockerfile: deploy/Dockerfile, args: { CMD: processor } }
+    environment:
+      TAPROOT_BROKERS: redpanda:29092
+      TAPROOT_CLICKHOUSE_ADDR: clickhouse:9000
+    depends_on:
+      redpanda-init: { condition: service_completed_successfully }
+      clickhouse: { condition: service_healthy }
+    restart: unless-stopped
+    mem_limit: 128m
 
   postgres:
     image: postgres:16.6

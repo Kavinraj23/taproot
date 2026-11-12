@@ -1,0 +1,7 @@
+.git
+.github
+.venv
+docs
+worker
+deploy/grafana
+**/*_test.go

@@ -16,7 +16,16 @@ DASH_UID=taproot-host-cpu
 failed=0
 pass() { echo "PASS  $1"; }
 fail() { echo "FAIL  $1: $2"; failed=1; }
-get() { curl -s -u "$AUTH" "$URL$1"; }
+# Retries an empty response (a blip while a freshly started stack is busy); errors still come through.
+get() {
+  local r
+  for _ in 1 2 3; do
+    r=$(curl -s -m 10 -u "$AUTH" "$URL$1")
+    [ -n "$r" ] && break
+    sleep 1
+  done
+  echo "$r"
+}
 # json EXPR: evaluate a Python expression over the JSON on stdin (bound to d).
 json() { python -c "import sys, json; d = json.load(sys.stdin); print($1)" 2>/dev/null; }
 

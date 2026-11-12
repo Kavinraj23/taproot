@@ -1,4 +1,4 @@
-.PHONY: build test lint up down
+.PHONY: build test lint up down check
 
 build:
 	go build ./...
@@ -10,8 +10,14 @@ test:
 lint:
 	go vet ./...
 
+# Taproot stack plus the OpenTelemetry demo. The scripts also run without make (bash scripts/up.sh).
 up:
-	docker compose -f deploy/docker-compose.yml up -d
+	bash scripts/up.sh
 
 down:
-	docker compose -f deploy/docker-compose.yml down
+	bash scripts/down.sh
+
+check:
+	bash scripts/check-pipeline.sh
+	bash scripts/check-grafana.sh
+	bash scripts/check-demo.sh

@@ -63,3 +63,26 @@ Lowering the Docker cap does not free RAM that the VM isn't using, but it stops 
 The deployment decision holds: the full demo plus Taproot's stack runs on the 16 GB laptop with Docker Compose, using ~4 GiB inside a 6 GB Docker cap, and survives the Kafka overload scenario. Host free RAM stays at 0.2–0.3 GB with my usual apps open, so close heavy apps during demos. Taproot's own Go services and the Python worker aren't running yet and will add a little.
 
 Requirements for the one-command setup: pin the demo to a release tag (3.1.0), carry the `compose.local.yaml` memory override for `product-catalog` and `checkout`, and set the Docker cap in `.wslconfig`.
+
+## Sustained run (2026-11-12)
+- **Full demo (with its observability stack) + Taproot, a few hours under the 6 GB cap:** the VM had used 2013 of 2048 MB swap with 74 MB free.
+  - VM CPU sat at 50–90% with no added load.
+  - ClickHouse stopped answering queries, and the agent missed ticks.
+  - Taproot's pipeline lost nothing (Redpanda and ClickHouse counts matched).
+  - The container total measured above (~4 GiB) misses the VM's kernel, file cache and swap, so it under-reported the pressure.
+- **Fix:** run the demo without its observability stack (OpenSearch, Jaeger, Prometheus, Grafana). See `docs/decisions/0004-demo-without-observability-stack.md`.
+- **After the fix:** 29 containers, ~3.6–3.7 GiB inside containers. Start-up dropped from ~4 min to 1m19s. 30-minute soak, laptop awake:
+
+| Time | VM available | VM swap | Rows / 5 min | VM CPU |
+|---|---|---|---|---|
+| 11:31 | 2420 MB | 754 MB | 284 | 11.3% |
+| 11:36 | 2455 MB | 925 MB | 283 | 10.6% |
+| 11:41 | 2390 MB | 979 MB | 286 | 10.7% |
+| 11:46 | 2345 MB | 1027 MB | 283 | 10.3% |
+| 11:51 | 2365 MB | 1023 MB | 281 | 10.4% |
+| 11:56 | 2294 MB | 1049 MB | 283 | 10.7% |
+
+- **Swap:** it levels off at about 1 GB, with pages moving in and out at up to ~45 MB per 10s. Memory pressure (PSI, `full avg60`) is only 0.2–0.4%, so tasks are barely stalled. This is the kernel trading idle pages for file cache, not thrashing, so `check-demo.sh` B5 checks pressure rather than swap.
+- **Windows:** the host is the tight side, with 0.5 GB free while Docker's VM held 4.5 GB and Chrome, Spotify and others were open. Claude Code's background-task memory guard fired once. Close heavy apps during demos.
+- **Open item (M2):** the agent records about 283 points per 5 minutes instead of 300 (~6% short). Redpanda and ClickHouse match, so the pipeline loses nothing; the agent ticks less often than once per real second. Suspected cause: the VM is paused in small slices under host memory pressure, and its clock drifts (seen before, 40s off and correcting in jumps). Not confirmed. Check when M2 adds 1-second sensors.
+- **Load test** through `scripts/up.sh`: VM CPU went from 11.4% to 51.1% under 8 busy loops (expected ≈ 11 + 8/22 × 100 ≈ 47%), then back down.
