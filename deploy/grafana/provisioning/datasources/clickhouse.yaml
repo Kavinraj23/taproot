@@ -1,0 +1,15 @@
+apiVersion: 1
+
+datasources:
+  - name: ClickHouse
+    uid: taproot-clickhouse
+    type: grafana-clickhouse-datasource
+    isDefault: true
+    jsonData:
+      host: clickhouse
+      port: 9000
+      protocol: native
+      username: taproot
+      defaultDatabase: taproot
+    secureJsonData:
+      password: taproot # local-only credentials, same as docker-compose.yml

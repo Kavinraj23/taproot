@@ -61,6 +61,9 @@ services:
 
   grafana:
     image: grafana/grafana:11.4.0
+    # 4.14.0 is the newest plugin release that supports Grafana 11.4 (4.15+ needs 11.6).
+    environment:
+      GF_INSTALL_PLUGINS: grafana-clickhouse-datasource 4.14.0
     ports: ["3001:3000"]  # 3001 so it doesn't clash with the demo's Grafana
     volumes:
       - grafana-data:/var/lib/grafana
