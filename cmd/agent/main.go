@@ -2,16 +2,16 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"taproot/internal/agent"
 	"taproot/internal/cpu"
-	"taproot/internal/model"
+	"taproot/internal/sink"
 )
 
 func main() {
@@ -20,23 +20,34 @@ func main() {
 		log.Fatalf("hostname: %v", err)
 	}
 
+	brokers := strings.Split(envOr("TAPROOT_BROKERS", "localhost:9092"), ",")
+	topic := envOr("TAPROOT_TOPIC", "taproot.metrics")
+	client, err := sink.NewClient(brokers, topic)
+	if err != nil {
+		log.Fatalf("redpanda client: %v", err)
+	}
+	out := sink.New(client, log.Printf)
+	defer out.Close(5 * time.Second)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
-	// Points go to stdout as JSON lines for now; a Redpanda producer replaces this later.
-	enc := json.NewEncoder(os.Stdout)
+	log.Printf("agent on %s sending to %s at %v", host, topic, brokers)
 	agent.Run(ctx, ticker.C, agent.Config{
 		Read: func() (cpu.Times, error) { return cpu.Read("/proc/stat") },
 		Now:  time.Now,
 		Host: host,
-		Emit: func(p model.Point) {
-			if err := enc.Encode(p); err != nil {
-				log.Printf("emit point: %v", err)
-			}
-		},
+		Emit: out.Emit,
 		Logf: log.Printf,
 	})
+}
+
+func envOr(name, fallback string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return fallback
 }

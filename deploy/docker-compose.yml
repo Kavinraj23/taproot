@@ -9,11 +9,32 @@ services:
       - --mode=dev-container
       - --smp=1
       - --memory=512M
-      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
-      - --advertise-kafka-addr=PLAINTEXT://localhost:9092
+      # Two listeners: containers reach redpanda:29092, the host reaches localhost:9092.
+      # Clients follow the advertised address, so one listener can't serve both.
+      - --kafka-addr=internal://0.0.0.0:29092,external://0.0.0.0:9092
+      - --advertise-kafka-addr=internal://redpanda:29092,external://localhost:9092
     ports: ["9092:9092"]
     volumes: ["redpanda-data:/var/lib/redpanda/data"]
     mem_limit: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -Eq 'Healthy:.+true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # Creates Taproot's topics once Redpanda is up, so nothing relies on auto-creation.
+  # Keyed by series, so 3 partitions still keep each series in order.
+  redpanda-init:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.3.11
+    depends_on:
+      redpanda: { condition: service_healthy }
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        out=$$(rpk topic create taproot.metrics -p 3 -X brokers=redpanda:29092 2>&1);
+        echo "$$out";
+        echo "$$out" | grep -Eq 'OK|TOPIC_ALREADY_EXISTS'
+    restart: "no"
 
   clickhouse:
     image: clickhouse/clickhouse-server:24.8
