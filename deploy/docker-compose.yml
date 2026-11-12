@@ -38,6 +38,11 @@ services:
 
   clickhouse:
     image: clickhouse/clickhouse-server:24.8
+    # Without a password the image only allows the default user from inside the container.
+    environment:
+      CLICKHOUSE_USER: taproot
+      CLICKHOUSE_PASSWORD: taproot
+      CLICKHOUSE_DB: taproot
     ports: ["8123:8123", "9000:9000"]
     volumes: ["clickhouse-data:/var/lib/clickhouse"]
     ulimits:
