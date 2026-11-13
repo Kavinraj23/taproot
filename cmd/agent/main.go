@@ -14,6 +14,7 @@ import (
 	"taproot/internal/agent"
 	"taproot/internal/cpu"
 	"taproot/internal/discovery"
+	"taproot/internal/docker"
 	"taproot/internal/sink"
 )
 
@@ -65,10 +66,18 @@ func printScan(procRoot string) error {
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
+	svcs := discovery.Identify(procs)
+	// Docker only adds names; without it the scan still works.
+	sock := envOr("TAPROOT_DOCKER_SOCKET", "/var/run/docker.sock")
+	if cs, err := docker.NewUnixClient(sock).Containers(context.Background()); err != nil {
+		log.Printf("docker unavailable, services not labelled with container names: %v", err)
+	} else {
+		svcs = discovery.Enrich(svcs, cs)
+	}
 	return enc.Encode(struct {
 		Services  []discovery.Service `json:"services"`
 		Processes []discovery.Process `json:"processes"`
-	}{discovery.Identify(procs), procs})
+	}{svcs, procs})
 }
 
 func envOr(name, fallback string) string {

@@ -74,6 +74,15 @@ func TestKindOf(t *testing.T) {
 	}
 }
 
+func TestIdentifyCarriesContainerID(t *testing.T) {
+	p := pgMaster(412, 5432)
+	p.ContainerID = cid
+	got := Identify([]Process{p})
+	if len(got) != 1 || got[0].ContainerID != cid {
+		t.Errorf("Identify = %+v, want one service with ContainerID %q", got, cid)
+	}
+}
+
 func pgMaster(pid int, ports ...int) Process {
 	return Process{PID: pid, PPID: 1, Name: "postgres", Cmdline: []string{"postgres"}, ListenPorts: ports}
 }

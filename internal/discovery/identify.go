@@ -12,6 +12,13 @@ type Service struct {
 	PID  int    `json:"pid"`  // the instance's root process, e.g. the Postgres postmaster
 	Name string `json:"name"` // process name, for display
 	Port int    `json:"port"` // listening port; 0 if unknown
+
+	// Container details. ContainerID comes from /proc; the rest from Docker (see Enrich).
+	ContainerID    string `json:"container_id,omitempty"`
+	Container      string `json:"container,omitempty"`
+	Image          string `json:"image,omitempty"`
+	Project        string `json:"project,omitempty"`
+	ComposeService string `json:"compose_service,omitempty"`
 }
 
 // rule recognises one kind of service by what the process is. Ports never decide the kind
@@ -47,7 +54,13 @@ func Identify(procs []Process) []Service {
 		if !ok || kinds[p.PPID] == r.kind {
 			continue
 		}
-		out = append(out, Service{Kind: r.kind, PID: p.PID, Name: p.Name, Port: pickPort(p.ListenPorts, r.defaultPort)})
+		out = append(out, Service{
+			Kind:        r.kind,
+			PID:         p.PID,
+			Name:        p.Name,
+			Port:        pickPort(p.ListenPorts, r.defaultPort),
+			ContainerID: p.ContainerID,
+		})
 	}
 	slices.SortFunc(out, func(a, b Service) int { return a.PID - b.PID })
 	return out

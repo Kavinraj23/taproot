@@ -5,6 +5,7 @@ package discovery
 import (
 	"io/fs"
 	"path"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -13,11 +14,12 @@ import (
 // Process is one user-space process seen in /proc.
 type Process struct {
 	PID         int      `json:"pid"`
-	PPID        int      `json:"ppid"`         // parent PID from /proc/<pid>/stat; 0 if unreadable
-	Name       string   `json:"name"`         // /proc/<pid>/comm
-	Exe         string   `json:"exe"`          // target of /proc/<pid>/exe; "" if unreadable
-	Cmdline     []string `json:"cmdline"`      // /proc/<pid>/cmdline split on NUL
-	ListenPorts []int    `json:"listen_ports"` // TCP ports in LISTEN state (v4 and v6), sorted, deduped
+	PPID        int      `json:"ppid"`                   // parent PID from /proc/<pid>/stat; 0 if unreadable
+	Name        string   `json:"name"`                   // /proc/<pid>/comm
+	Exe         string   `json:"exe"`                    // target of /proc/<pid>/exe; "" if unreadable
+	Cmdline     []string `json:"cmdline"`                // /proc/<pid>/cmdline split on NUL
+	ListenPorts []int    `json:"listen_ports"`           // TCP ports in LISTEN state (v4 and v6), sorted, deduped
+	ContainerID string   `json:"container_id,omitempty"` // Docker container ID from /proc/<pid>/cgroup
 }
 
 // tcpListen is the state column value for LISTEN in /proc/net/tcp.
@@ -73,6 +75,9 @@ func readProcess(fsys fs.FS, dir string, pid int, listenByNetns map[string]map[u
 	}
 	if stat, err := fs.ReadFile(fsys, path.Join(dir, "stat")); err == nil {
 		p.PPID, _ = parseStatPPID(string(stat))
+	}
+	if cg, err := fs.ReadFile(fsys, path.Join(dir, "cgroup")); err == nil {
+		p.ContainerID = containerIDFromCgroup(string(cg))
 	}
 	if exe, err := fs.ReadLink(fsys, path.Join(dir, "exe")); err == nil {
 		p.Exe = exe
@@ -173,6 +178,24 @@ func socketInode(target string) (uint64, bool) {
 	}
 	inode, err := strconv.ParseUint(s, 10, 64)
 	return inode, err == nil
+}
+
+// containerIDRe matches a Docker container ID: exactly 64 lowercase hex characters, not part of a
+// longer hex run.
+var containerIDRe = regexp.MustCompile(`(?:^|[^0-9a-f])([0-9a-f]{64})(?:[^0-9a-f]|$)`)
+
+// containerIDFromCgroup finds the Docker container ID in /proc/<pid>/cgroup text. Docker names
+// each container's cgroup after its ID, in several layouts ("/docker/<id>",
+// "/system.slice/docker-<id>.scope", or "/../<id>" when read from inside another container's
+// cgroup namespace). The last ID found wins. Host processes give "".
+func containerIDFromCgroup(text string) string {
+	id := ""
+	for _, line := range strings.Split(text, "\n") {
+		for _, m := range containerIDRe.FindAllStringSubmatch(line, -1) {
+			id = m[1]
+		}
+	}
+	return id
 }
 
 // parseStatPPID returns the parent PID from /proc/<pid>/stat text: "pid (comm) state ppid ...".

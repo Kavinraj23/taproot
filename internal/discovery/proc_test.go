@@ -117,6 +117,47 @@ func TestScanReadsPPID(t *testing.T) {
 	}
 }
 
+const cid = "3f4e5d6c7b8a99887766554433221100ffeeddccbbaa00112233445566778899"
+
+func TestContainerIDFromCgroup(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want string
+	}{
+		{"cgroup v2 docker", "0::/docker/" + cid + "\n", cid},
+		{"systemd scope", "0::/system.slice/docker-" + cid + ".scope\n", cid},
+		{"cgroup v1 multi-line", "12:memory:/docker/" + cid + "\n11:cpu,cpuacct:/docker/" + cid + "\n1:name=systemd:/docker/" + cid + "\n", cid},
+		{"relative to agent's cgroup namespace", "0::/../" + cid + "\n", cid},
+		{"host process", "0::/\n", ""},
+		{"empty", "", ""},
+		{"64 chars not all hex", "0::/docker/" + cid[:60] + "wxyz\n", ""},
+		{"63 hex chars", "0::/docker/" + cid[:63] + "\n", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := containerIDFromCgroup(tt.text); got != tt.want {
+				t.Errorf("containerIDFromCgroup = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestScanReadsContainerID(t *testing.T) {
+	fsys := fstest.MapFS{}
+	addProc(fsys, "412", "postgres", "postgres\x00", "", "")
+	fsys["412/cgroup"] = file("0::/docker/" + cid + "\n")
+	addProc(fsys, "500", "sshd", "sshd\x00", "", "") // no cgroup file
+
+	got := scanByPID(t, fsys)
+	if got[412].ContainerID != cid {
+		t.Errorf("pid 412 ContainerID = %q, want %q", got[412].ContainerID, cid)
+	}
+	if p, ok := got[500]; !ok || p.ContainerID != "" {
+		t.Errorf("pid 500 = %+v, %v; want kept with empty ContainerID", p, ok)
+	}
+}
+
 func link(target string) *fstest.MapFile {
 	return &fstest.MapFile{Mode: fs.ModeSymlink, Data: []byte(target)}
 }
