@@ -65,7 +65,10 @@ func printScan(procRoot string) error {
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	return enc.Encode(procs)
+	return enc.Encode(struct {
+		Services  []discovery.Service `json:"services"`
+		Processes []discovery.Process `json:"processes"`
+	}{discovery.Identify(procs), procs})
 }
 
 func envOr(name, fallback string) string {

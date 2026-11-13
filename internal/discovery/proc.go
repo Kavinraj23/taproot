@@ -13,7 +13,8 @@ import (
 // Process is one user-space process seen in /proc.
 type Process struct {
 	PID         int      `json:"pid"`
-	Name        string   `json:"name"`         // /proc/<pid>/comm
+	PPID        int      `json:"ppid"`         // parent PID from /proc/<pid>/stat; 0 if unreadable
+	Name       string   `json:"name"`         // /proc/<pid>/comm
 	Exe         string   `json:"exe"`          // target of /proc/<pid>/exe; "" if unreadable
 	Cmdline     []string `json:"cmdline"`      // /proc/<pid>/cmdline split on NUL
 	ListenPorts []int    `json:"listen_ports"` // TCP ports in LISTEN state (v4 and v6), sorted, deduped
@@ -69,6 +70,9 @@ func readProcess(fsys fs.FS, dir string, pid int, listenByNetns map[string]map[u
 		Name:        strings.TrimSuffix(string(comm), "\n"),
 		Cmdline:     cmdline,
 		ListenPorts: []int{},
+	}
+	if stat, err := fs.ReadFile(fsys, path.Join(dir, "stat")); err == nil {
+		p.PPID, _ = parseStatPPID(string(stat))
 	}
 	if exe, err := fs.ReadLink(fsys, path.Join(dir, "exe")); err == nil {
 		p.Exe = exe
@@ -169,6 +173,24 @@ func socketInode(target string) (uint64, bool) {
 	}
 	inode, err := strconv.ParseUint(s, 10, 64)
 	return inode, err == nil
+}
+
+// parseStatPPID returns the parent PID from /proc/<pid>/stat text: "pid (comm) state ppid ...".
+// comm may contain spaces and parentheses, so the fields are read after the last ')'.
+func parseStatPPID(text string) (int, bool) {
+	i := strings.LastIndexByte(text, ')')
+	if i < 0 {
+		return 0, false
+	}
+	f := strings.Fields(text[i+1:])
+	if len(f) < 2 {
+		return 0, false
+	}
+	ppid, err := strconv.Atoi(f[1])
+	if err != nil {
+		return 0, false
+	}
+	return ppid, true
 }
 
 // parseCmdline splits /proc/<pid>/cmdline on NUL. Empty input (a kernel thread) gives nil.

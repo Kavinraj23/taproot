@@ -81,6 +81,42 @@ func TestParseCmdline(t *testing.T) {
 	}
 }
 
+func TestParseStatPPID(t *testing.T) {
+	tests := []struct {
+		text   string
+		want   int
+		wantOK bool
+	}{
+		{"412 (postgres) S 1 412 412 0 -1 4194560 ...\n", 1, true},
+		{"77 (my (weird) prog) S 9 77 77 0 -1 ...\n", 9, true},
+		{"", 0, false},
+		{"412 postgres S 1 412", 0, false}, // no parens
+		{"412 (postgres)", 0, false},       // nothing after comm
+		{"412 (postgres) S x 412", 0, false},
+	}
+	for _, tt := range tests {
+		got, ok := parseStatPPID(tt.text)
+		if got != tt.want || ok != tt.wantOK {
+			t.Errorf("parseStatPPID(%q) = %d, %v; want %d, %v", tt.text, got, ok, tt.want, tt.wantOK)
+		}
+	}
+}
+
+func TestScanReadsPPID(t *testing.T) {
+	fsys := fstest.MapFS{}
+	addProc(fsys, "420", "postgres", "postgres: checkpointer \x00", "", "")
+	fsys["420/stat"] = file("420 (postgres) S 412 412 412 0 -1 ...\n")
+	addProc(fsys, "421", "postgres", "postgres: walwriter \x00", "", "") // no stat file
+
+	got := scanByPID(t, fsys)
+	if got[420].PPID != 412 {
+		t.Errorf("pid 420 PPID = %d, want 412", got[420].PPID)
+	}
+	if p, ok := got[421]; !ok || p.PPID != 0 {
+		t.Errorf("pid 421 = %+v, %v; want kept with PPID 0", p, ok)
+	}
+}
+
 func link(target string) *fstest.MapFile {
 	return &fstest.MapFile{Mode: fs.ModeSymlink, Data: []byte(target)}
 }
