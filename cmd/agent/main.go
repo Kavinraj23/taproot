@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"flag"
 	"log"
 	"os"
 	"os/signal"
@@ -11,10 +13,20 @@ import (
 
 	"taproot/internal/agent"
 	"taproot/internal/cpu"
+	"taproot/internal/discovery"
 	"taproot/internal/sink"
 )
 
 func main() {
+	scan := flag.Bool("scan", false, "print one /proc process scan as JSON and exit")
+	flag.Parse()
+	if *scan {
+		if err := printScan(envOr("TAPROOT_PROC_ROOT", "/proc")); err != nil {
+			log.Fatalf("scan: %v", err)
+		}
+		return
+	}
+
 	host, err := os.Hostname()
 	if err != nil {
 		log.Fatalf("hostname: %v", err)
@@ -43,6 +55,17 @@ func main() {
 		Emit: out.Emit,
 		Logf: log.Printf,
 	})
+}
+
+// printScan is a debug hook: it shows what discovery sees from where the agent runs.
+func printScan(procRoot string) error {
+	procs, err := discovery.Scan(os.DirFS(procRoot))
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(procs)
 }
 
 func envOr(name, fallback string) string {

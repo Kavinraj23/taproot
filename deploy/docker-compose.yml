@@ -55,10 +55,16 @@ services:
       retries: 12
 
   # Reads CPU from /proc/stat. Inside a container that's the Docker VM's CPU (not Windows').
-  # M2's discovery will add pid: host and the Docker socket.
+  # pid: host lets discovery see every process in the Docker VM, not just its own.
+  # Reading other users' /proc/<pid>/fd and exe needs ptrace-read access: root plus SYS_PTRACE.
+  # Without them the scan still lists processes, but with no exe and no listening ports.
+  # The Docker socket comes with Docker enrichment (M2 task 3).
   agent:
     build: { context: .., dockerfile: deploy/Dockerfile, args: { CMD: agent } }
     hostname: docker-vm # stable series name across container recreations
+    pid: host
+    user: "0"
+    cap_add: [SYS_PTRACE]
     environment:
       TAPROOT_BROKERS: redpanda:29092
     depends_on:
