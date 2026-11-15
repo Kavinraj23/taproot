@@ -17,6 +17,7 @@ import (
 	"taproot/internal/cpu"
 	"taproot/internal/discovery"
 	"taproot/internal/docker"
+	"taproot/internal/sensor"
 	"taproot/internal/sink"
 )
 
@@ -55,7 +56,23 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	go runDiscovery(ctx, procFS, dockerClient, interval)
+	sensors := sensor.NewManager(sensor.ManagerConfig{
+		Factories: map[string]sensor.Factory{
+			"postgres": sensor.NewPostgres(
+				envOr("TAPROOT_POSTGRES_USER", "monitoring_user"),
+				envOr("TAPROOT_POSTGRES_PASSWORD", "monitoring_password")),
+		},
+		Emit: out.Emit,
+		Now:  time.Now,
+		Host: host,
+		Logf: log.Printf,
+	})
+	defer sensors.Stop()
+
+	go runDiscovery(ctx, procFS, dockerClient, interval, func(c discovery.Changes) {
+		logChanges(c)
+		sensors.Apply(c)
+	})
 
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -71,9 +88,8 @@ func main() {
 }
 
 // runDiscovery keeps the service list current: a full rescan every interval, plus an early one
-// shortly after Docker reports a container starting or stopping. For now changes are logged;
-// the sensors will consume them.
-func runDiscovery(ctx context.Context, procFS fs.FS, dc *docker.Client, interval time.Duration) {
+// shortly after Docker reports a container starting or stopping. onChange gets every change.
+func runDiscovery(ctx context.Context, procFS fs.FS, dc *docker.Client, interval time.Duration, onChange func(discovery.Changes)) {
 	triggers := make(chan struct{}, 1)
 	go discovery.Ring(ctx, dc.Events, triggers, 2*time.Second, log.Printf, time.Second)
 
@@ -92,7 +108,7 @@ func runDiscovery(ctx context.Context, procFS fs.FS, dc *docker.Client, interval
 		},
 		Ticks:    ticker.C,
 		Triggers: triggers,
-		OnChange: logChanges,
+		OnChange: onChange,
 		Logf:     log.Printf,
 	})
 }

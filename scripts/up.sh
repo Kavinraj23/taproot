@@ -25,6 +25,11 @@ echo "Starting OpenTelemetry demo..."
     up -d --remove-orphans
 )
 
+# The agent's sensors reach the demo's Postgres, Valkey and Kafka by container name, so the
+# agent joins the demo's network too (docs/decisions/0005-sensor-reach-and-postgres-login.md).
+# Already connected is fine.
+docker network connect opentelemetry-demo deploy-agent-1 2>/dev/null || true
+
 echo "Waiting for the demo shop..."
 for _ in $(seq 1 60); do
   if [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/api/products)" = "200" ]; then

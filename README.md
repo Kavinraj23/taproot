@@ -39,4 +39,6 @@ make test   # Go and Python unit tests
 make lint
 TAPROOT_BROKERS=localhost:9092 go test -tags integration ./internal/sink/
 TAPROOT_CLICKHOUSE_ADDR=localhost:9000 go test -tags integration ./internal/store/
+# throwaway Postgres: docker run -d --name pg-it -e POSTGRES_PASSWORD=pw -p 55432:5432 postgres:18.4
+TAPROOT_PG_TEST_ADDR=localhost:55432 go test -tags integration ./internal/sensor/
 ```
