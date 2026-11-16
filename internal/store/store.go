@@ -4,6 +4,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
@@ -59,7 +60,7 @@ func (s *Store) rollupView() string       { return s.name(s.cfg.Table + "_1m_mv"
 //
 // The raw table is sorted by (metric, ts) because queries read one metric over a time range,
 // and partitioned by day so expired data goes in whole parts. Plain MergeTree: duplicates are
-// kept until dedup lands in M3.
+// kept out by InsertNew, which skips points already stored, so the rollup view never sees them.
 func (s *Store) EnsureSchema(ctx context.Context) error {
 	if err := s.conn.Exec(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", s.cfg.Database)); err != nil {
 		return fmt.Errorf("create database: %w", err)
@@ -136,6 +137,88 @@ func (s *Store) Insert(ctx context.Context, pts []model.Point) error {
 		return fmt.Errorf("send batch: %w", err)
 	}
 	return nil
+}
+
+// InsertNew writes the points of pts that aren't stored yet, and returns how many it wrote.
+// A replayed batch (the processor crashed after writing it but before marking it done) or a
+// point the agent sent twice is dropped here, before it reaches the table and the rollup view.
+//
+// Identity is model.Point.Key: metric, sorted labels and timestamp. One lookup per batch
+// reads the stored points of the batch's metrics over the batch's time span; it uses the
+// (metric, ts) sort key.
+func (s *Store) InsertNew(ctx context.Context, pts []model.Point) (int, error) {
+	if len(pts) == 0 {
+		return 0, nil
+	}
+	fresh := make([]model.Point, 0, len(pts))
+	keys := make([]string, 0, len(pts))
+	seen := make(map[string]bool, len(pts))
+	metrics := map[string]bool{}
+	from, to := pts[0].Timestamp, pts[0].Timestamp
+	for _, p := range pts {
+		k := p.Key()
+		if seen[k] {
+			continue // the same point twice in one batch
+		}
+		seen[k] = true
+		fresh = append(fresh, p)
+		keys = append(keys, k)
+		metrics[p.Metric] = true
+		if p.Timestamp.Before(from) {
+			from = p.Timestamp
+		}
+		if p.Timestamp.After(to) {
+			to = p.Timestamp
+		}
+	}
+
+	stored, err := s.storedKeys(ctx, metrics, from, to)
+	if err != nil {
+		return 0, err
+	}
+	out := fresh[:0]
+	for i, p := range fresh {
+		if !stored[keys[i]] {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return 0, nil
+	}
+	if err := s.Insert(ctx, out); err != nil {
+		return 0, err
+	}
+	return len(out), nil
+}
+
+// storedKeys returns the Keys of stored points of these metrics between from and to.
+// clickhouse-go binds a time.Time parameter at second precision, so the bounds are whole
+// seconds that contain [from, to]; extra rows only cost a little reading.
+func (s *Store) storedKeys(ctx context.Context, metrics map[string]bool, from, to time.Time) (map[string]bool, error) {
+	names := make([]string, 0, len(metrics))
+	for m := range metrics {
+		names = append(names, m)
+	}
+	lo := from.UTC().Truncate(time.Second)
+	hi := to.UTC().Truncate(time.Second).Add(time.Second)
+	rows, err := s.conn.Query(ctx, "SELECT metric, labels, ts FROM "+s.table()+
+		" WHERE metric IN ? AND ts >= ? AND ts < ?", names, lo, hi)
+	if err != nil {
+		return nil, fmt.Errorf("look up stored points: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var p model.Point
+		if err := rows.Scan(&p.Metric, &p.Labels, &p.Timestamp); err != nil {
+			return nil, fmt.Errorf("scan stored point: %w", err)
+		}
+		out[p.Key()] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("look up stored points: %w", err)
+	}
+	return out, nil
 }
 
 // Close closes the connection.
