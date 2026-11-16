@@ -43,28 +43,75 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 	return &Store{conn: conn, cfg: cfg}, nil
 }
 
-func (s *Store) table() string { return fmt.Sprintf("`%s`.`%s`", s.cfg.Database, s.cfg.Table) }
+// How long each resolution is kept (docs/decisions/0006-metric-rollups-and-retention.md).
+const (
+	RawRetentionHours   = 48 // 1-second points
+	RollupRetentionDays = 30 // 1-minute rollups
+)
 
-// EnsureSchema creates the database and metrics table if they don't exist, so it is safe to
-// run on every start.
+func (s *Store) name(table string) string { return fmt.Sprintf("`%s`.`%s`", s.cfg.Database, table) }
+func (s *Store) table() string            { return s.name(s.cfg.Table) }
+func (s *Store) rollupTable() string      { return s.name(s.cfg.Table + "_1m") }
+func (s *Store) rollupView() string       { return s.name(s.cfg.Table + "_1m_mv") }
+
+// EnsureSchema creates the database, the 1-second metrics table, its 1-minute rollup table and
+// the view that fills it, and sets retention on both tables. Safe to run on every start.
 //
-// Sorted by (metric, ts) because queries read one metric over a time range. Partitioned by
-// day so dropping old 1-second data (M2) is a cheap whole-partition drop. Plain MergeTree:
-// duplicates are kept until dedup lands in M3.
+// The raw table is sorted by (metric, ts) because queries read one metric over a time range,
+// and partitioned by day so expired data goes in whole parts. Plain MergeTree: duplicates are
+// kept until dedup lands in M3.
 func (s *Store) EnsureSchema(ctx context.Context) error {
 	if err := s.conn.Exec(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", s.cfg.Database)); err != nil {
 		return fmt.Errorf("create database: %w", err)
 	}
-	ddl := `CREATE TABLE IF NOT EXISTS ` + s.table() + ` (
+	rawTTL := fmt.Sprintf("TTL toDateTime(ts) + INTERVAL %d HOUR", RawRetentionHours)
+	raw := `CREATE TABLE IF NOT EXISTS ` + s.table() + ` (
     metric LowCardinality(String),
     labels Map(LowCardinality(String), String),
     ts     DateTime64(9, 'UTC'),
     value  Float64
 ) ENGINE = MergeTree
 PARTITION BY toDate(ts)
-ORDER BY (metric, ts)`
-	if err := s.conn.Exec(ctx, ddl); err != nil {
+ORDER BY (metric, ts)
+` + rawTTL
+	if err := s.conn.Exec(ctx, raw); err != nil {
 		return fmt.Errorf("create table: %w", err)
+	}
+	// CREATE ... IF NOT EXISTS leaves a table made before retention existed untouched.
+	if err := s.conn.Exec(ctx, "ALTER TABLE "+s.table()+" MODIFY "+rawTTL); err != nil {
+		return fmt.Errorf("set raw retention: %w", err)
+	}
+
+	// One row per series per minute. A minute that arrives in several insert batches is several
+	// rows until background merges combine them, so every query must aggregate:
+	//   SELECT minute, sum(sum)/sum(count) AS avg, min(min), max(max)
+	//   FROM metrics_1m WHERE ... GROUP BY metric, labels, minute
+	rollup := `CREATE TABLE IF NOT EXISTS ` + s.rollupTable() + ` (
+    metric LowCardinality(String),
+    labels Map(LowCardinality(String), String),
+    minute DateTime('UTC'),
+    sum    SimpleAggregateFunction(sum, Float64),
+    count  SimpleAggregateFunction(sum, UInt64),
+    min    SimpleAggregateFunction(min, Float64),
+    max    SimpleAggregateFunction(max, Float64)
+) ENGINE = AggregatingMergeTree
+PARTITION BY toDate(minute)
+ORDER BY (metric, labels, minute)
+` + fmt.Sprintf("TTL minute + INTERVAL %d DAY", RollupRetentionDays)
+	if err := s.conn.Exec(ctx, rollup); err != nil {
+		return fmt.Errorf("create rollup table: %w", err)
+	}
+
+	// Runs on every insert into the raw table, over just the inserted rows. Labels are sorted:
+	// a Map keeps insertion order and Go maps iterate randomly, so one series arrives with its
+	// labels in different orders, and unsorted they would be separate rollup rows.
+	view := `CREATE MATERIALIZED VIEW IF NOT EXISTS ` + s.rollupView() + ` TO ` + s.rollupTable() + ` AS
+SELECT metric, mapSort(labels) AS labels, toStartOfMinute(ts) AS minute,
+       sum(value) AS sum, count() AS count, min(value) AS min, max(value) AS max
+FROM ` + s.table() + `
+GROUP BY metric, labels, minute`
+	if err := s.conn.Exec(ctx, view); err != nil {
+		return fmt.Errorf("create rollup view: %w", err)
 	}
 	return nil
 }

@@ -1,0 +1,14 @@
+# 0006: Metric rollups by materialized view; 48 hours raw, 30 days of 1-minute rollups
+
+- **Decision:** 1-second points are kept 48 hours (TTL on `taproot.metrics`). Every insert also feeds a ClickHouse materialized view (`metrics_1m_mv`) that writes per-series, per-minute `sum`, `count`, `min` and `max` into `taproot.metrics_1m` (AggregatingMergeTree), kept 30 days. The processor creates all of it in `store.EnsureSchema` on start, and sets the raw TTL on an existing table with `ALTER TABLE ... MODIFY TTL`. Existing data was not backfilled.
+- **Why:**
+  - *48 hours, not "recent hours":* raw spans and logs are kept about two days so yesterday's test run can be examined. Keeping 1-second metrics for the same window means that run still has second-level detail. At v1 scale this is a few MB.
+  - *30 days of rollups:* enough to compare against last week for baselines (M6). Tiny at one row per series per minute.
+  - *View at insert time, not a periodic job:* no scheduler to run and nothing to track about which minutes are done, and late points are rolled up whenever they arrive. Refreshable materialized views are experimental in ClickHouse 24.8.
+  - *Sum/count/min/max, not just the average:* the average is `sum(sum)/sum(count)`. Min and max keep a short spike visible inside a calm minute. Plain `SimpleAggregateFunction` columns keep queries readable (no `-State`/`-Merge`).
+- **Rules that follow from this:**
+  - A minute that arrives in several insert batches is several rows until background merges combine them. **Every query on `metrics_1m` must aggregate**: `GROUP BY metric, labels, minute` with `sum(sum)`, `sum(count)`, `min(min)`, `max(max)`.
+  - **Labels are sorted in the view (`mapSort`).** A ClickHouse `Map` keeps the order its keys were inserted in, and Go maps iterate in random order, so the raw table holds one series under several label orders (122 apparent series that were really 37 when this was found). Rollup rows are keyed by sorted labels. Queries on the raw table that group by labels must use `mapSort(labels)`.
+  - The TTL applies on insert too: a point already older than 48 hours when it arrives (a long-buffered backlog) is not stored in `metrics` but is still rolled up into `metrics_1m`.
+  - **For M3 (dedup):** the view sees every inserted batch, duplicates included, so resent points are counted twice in the rollups unless they're dropped before or at insert (for example ClickHouse insert dedup tokens with `deduplicate_blocks_in_dependent_materialized_views=1`). A dedup that relies only on background merges of the raw table won't reach the rollups.
+- **Replaces:** Section 5 (Collection: "keep 1-second data for recent hours, roll older data up to 1-minute averages") and the Storage row's "1-second data for recent hours": now 48 hours, 1-minute rollups kept 30 days.
