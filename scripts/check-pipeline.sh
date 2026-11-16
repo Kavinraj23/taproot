@@ -42,8 +42,8 @@ fi
 lag=$(q "SELECT dateDiff('second', max(ts), now64()) FROM taproot.metrics WHERE labels['host'] = '$HOST'")
 [[ "$lag" =~ ^-?[0-9]+$ ]] && [ "$lag" -le 5 ] && pass "A3 newest point ${lag}s old" || fail "A3 freshness" "newest point ${lag}s old, want <= 5"
 
-# A4. No failed writes or skipped records.
-bad=$($C logs processor 2>&1 | grep -cE 'write .* failed|skip record')
-[ "$bad" = "0" ] && pass "A4 no write failures or skipped records" || fail "A4 processor logs" "$bad problem lines"
+# A4. No failed writes or skipped records in the last 5 minutes (older ones may be deliberate: make loss-proof).
+bad=$($C logs --since 5m processor 2>&1 | grep -cE 'write .* failed|skip record')
+[ "$bad" = "0" ] && pass "A4 no write failures or skipped records in 5 min" || fail "A4 processor logs" "$bad problem lines"
 
 exit $failed

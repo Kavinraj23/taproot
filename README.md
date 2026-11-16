@@ -2,7 +2,7 @@
 
 A mini observability system: discovers running services with no configuration, collects metrics and traces without losing data, and identifies the root cause of failures with evidence. See `docs/design.md`.
 
-Status: **M2 (discovery and sensors) done.** With no target configuration, the agent finds the demo's Postgres, Valkey and Kafka by scanning `/proc` (named through Docker, re-discovered within seconds of a restart) and measures each every second: connections and transactions, cache clients and hits/misses, Kafka consumer lag and throughput. Points travel agent → Redpanda → processor → ClickHouse, which keeps 1-second data for 48 hours and 1-minute rollups for 30 days, and Grafana shows them. M1 (walking skeleton: host CPU end to end, alongside the OpenTelemetry demo) is done too.
+Status: **M3 (lossless pipeline) done.** Kill the processor, ClickHouse, Redpanda or the agent for a minute and ClickHouse still ends up with every point exactly once: the agent keeps points in a disk buffer until Redpanda confirms them (hours of room, and it survives restarts), the processor marks a batch done only after storing it, and it skips points that are already stored. `make loss-proof` breaks each part in turn and checks. M2 (discovery and sensors: with no configuration, the agent finds the demo's Postgres, Valkey and Kafka and measures each every second; 1-second data kept 48 hours, 1-minute rollups 30 days) and M1 (walking skeleton alongside the OpenTelemetry demo) are done too.
 
 ## Run
 
@@ -19,7 +19,8 @@ Then, from Git Bash or any bash:
 ```
 bash scripts/up.sh     # Taproot stack + the OTel demo (clones it to ../otel-demo at 3.1.0 if missing)
 bash scripts/down.sh   # stop everything; data volumes are kept
-make check             # or run scripts/check-{pipeline,grafana,demo,sensors}.sh directly
+make check             # or run scripts/check-{pipeline,grafana,demo,sensors,loss}.sh directly
+make loss-proof        # M3 proof, ~17 min: kill each pipeline part, check nothing lost or doubled
 bash scripts/check-sensors.sh --restart kafka   # also restart a demo container and time re-discovery
 ```
 

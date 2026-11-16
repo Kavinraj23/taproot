@@ -31,7 +31,16 @@ func main() {
 	topic := flag.String("topic", "taproot.metrics", "topic the agent produces to")
 	chAddr := flag.String("clickhouse", "localhost:9000", "ClickHouse native address")
 	table := flag.String("table", "taproot.metrics", "raw metrics table")
+	after := flag.String("after", "", "start no earlier than this RFC 3339 time (e.g. a minute after the agent started, to skip its startup)")
 	flag.Parse()
+	var notBefore time.Time
+	if *after != "" {
+		t, err := time.Parse(time.RFC3339Nano, *after)
+		if err != nil {
+			log.Fatalf("-after: %v", err)
+		}
+		notBefore = t
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -55,6 +64,13 @@ func main() {
 	// fractional bound would make the two sides cut the window at slightly different places.
 	to := newest.Add(-*settle).Truncate(time.Second)
 	from := to.Add(-*window).Truncate(time.Second)
+	if notBefore.After(from) {
+		from = notBefore.Truncate(time.Second).Add(time.Second)
+	}
+	if !from.Before(to) {
+		fmt.Printf("nothing to check yet: the window starts at %s UTC, after its end %s\n", from.Format("15:04:05"), to.Format("15:04:05"))
+		return
+	}
 
 	sent, err := readTopic(ctx, strings.Split(*brokers, ","), *topic, from, to)
 	if err != nil {
