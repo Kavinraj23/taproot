@@ -1,5 +1,5 @@
 // Package processor moves metric points from Redpanda into storage: poll a batch, decode it,
-// write it, repeat.
+// write it, mark it done in Redpanda, repeat.
 package processor
 
 import (
@@ -18,10 +18,11 @@ const maxBackoff = 30 * time.Second
 
 // Config holds everything Run depends on, so tests can swap in fakes.
 type Config struct {
-	Poll  func(ctx context.Context) ([]*kgo.Record, error)  // one fetch from Redpanda
-	Write func(ctx context.Context, pts []model.Point) error // one batch insert
-	Wait  func(ctx context.Context, d time.Duration) error   // sleep d, or return ctx's error
-	Logf  func(format string, args ...any)
+	Poll   func(ctx context.Context) ([]*kgo.Record, error)    // one fetch from Redpanda
+	Write  func(ctx context.Context, pts []model.Point) error  // one batch insert
+	Commit func(ctx context.Context, recs []*kgo.Record) error // mark records done in Redpanda
+	Wait   func(ctx context.Context, d time.Duration) error    // sleep d, or return ctx's error
+	Logf   func(format string, args ...any)
 }
 
 // Decode turns a record into a point, rejecting records that would make a meaningless row.
@@ -47,9 +48,13 @@ func backoff(attempt int) time.Duration {
 	return min(time.Second<<(attempt-1), maxBackoff)
 }
 
-// Run polls, decodes and writes until ctx is done. A batch that fails to write is retried
-// with backoff before anything new is polled, so a storage outage pauses consumption and
-// Redpanda holds the backlog.
+// Run polls, decodes, writes and commits until ctx is done. A batch that fails to write is
+// retried with backoff before anything new is polled, so a storage outage pauses consumption
+// and Redpanda holds the backlog.
+//
+// Commit-after-write: a batch is marked done in Redpanda only once it is stored, so a crash at
+// any point re-reads it rather than losing it (at-least-once). A crash between the write and
+// the commit stores it again; the write path drops points that are already stored.
 func Run(ctx context.Context, cfg Config) {
 	for ctx.Err() == nil {
 		recs, err := cfg.Poll(ctx)
@@ -74,18 +79,20 @@ func Run(ctx context.Context, cfg Config) {
 			}
 			pts = append(pts, p)
 		}
-		if len(pts) == 0 {
+		if len(recs) == 0 {
 			continue
 		}
 
-		if !write(ctx, cfg, pts) {
+		if len(pts) > 0 && !write(ctx, cfg, pts) {
 			return
 		}
 
-		// M3 (hand-written): commit-after-write goes here. Mark these records done in
-		// Redpanda only now that they're stored. Until then the consumer auto-commits on a
-		// timer, which can commit records that were polled but not yet written: a crash in
-		// that window loses them.
+		// Every polled record, skipped ones included, so the offsets move past bad records.
+		// A failed commit only means a replay later, which dedup absorbs; the next commit
+		// covers these offsets anyway, so it isn't retried.
+		if err := cfg.Commit(ctx, recs); err != nil && ctx.Err() == nil {
+			cfg.Logf("commit %d records: %v", len(recs), err)
+		}
 	}
 }
 
@@ -119,15 +126,24 @@ func Sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// NewConsumer builds a consumer-group client for topic. Offsets are auto-committed on a
-// timer for now (see the M3 note in Run).
+// NewConsumer builds a consumer-group client for topic. Auto-commit is off: Run commits each
+// batch itself, right after it is written (see CommitFrom).
 func NewConsumer(brokers []string, topic string) (*kgo.Client, error) {
 	return kgo.NewClient(
 		kgo.SeedBrokers(brokers...),
 		kgo.ConsumerGroup("taproot-processor"),
 		kgo.ConsumeTopics(topic),
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()), // first run reads what's already there
+		kgo.DisableAutoCommit(),
 	)
+}
+
+// CommitFrom adapts a consumer client to Config.Commit. CommitRecords commits, per partition,
+// the offset after the highest record given.
+func CommitFrom(cl *kgo.Client) func(ctx context.Context, recs []*kgo.Record) error {
+	return func(ctx context.Context, recs []*kgo.Record) error {
+		return cl.CommitRecords(ctx, recs...)
+	}
 }
 
 // PollFrom adapts a consumer client to Config.Poll.

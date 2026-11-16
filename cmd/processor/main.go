@@ -40,14 +40,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("redpanda consumer: %v", err)
 	}
-	defer consumer.Close() // leaves the group; auto-commit makes its final commit here
+	defer consumer.Close() // leaves the group; every written batch is already committed
 
 	log.Printf("processor reading %s at %v into taproot.metrics", topic, brokers)
 	processor.Run(ctx, processor.Config{
-		Poll:  processor.PollFrom(consumer),
-		Write: db.Insert,
-		Wait:  processor.Sleep,
-		Logf:  log.Printf,
+		Poll:   processor.PollFrom(consumer),
+		Write:  db.Insert,
+		Commit: processor.CommitFrom(consumer),
+		Wait:   processor.Sleep,
+		Logf:   log.Printf,
 	})
 	log.Printf("processor stopped")
 }

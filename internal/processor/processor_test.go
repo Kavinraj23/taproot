@@ -52,9 +52,11 @@ type harness struct {
 	polls  []pollResult
 	polled int
 
-	writeErrs []error // one per Write call; nil or missing means success
-	writes    [][]model.Point
-	events    []string // "poll" / "write" in call order
+	writeErrs  []error // one per Write call; nil or missing means success
+	writes     [][]model.Point
+	commitErrs []error // one per Commit call; nil or missing means success
+	commits    [][]*kgo.Record
+	events     []string // "poll" / "write" / "commit" in call order
 
 	waits []time.Duration
 	logs  []string
@@ -67,9 +69,15 @@ type pollResult struct {
 
 func run(t *testing.T, polls []pollResult, writeErrs ...error) *harness {
 	t.Helper()
+	return runH(t, &harness{polls: polls, writeErrs: writeErrs})
+}
+
+// runH runs a prepared harness, for tests that also script Commit errors.
+func runH(t *testing.T, h *harness) *harness {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	h := &harness{t: t, cancel: cancel, polls: polls, writeErrs: writeErrs}
+	h.t, h.cancel = t, cancel
 
 	done := make(chan struct{})
 	go func() {
@@ -103,6 +111,15 @@ func (h *harness) config() Config {
 			h.events = append(h.events, "write")
 			if i < len(h.writeErrs) {
 				return h.writeErrs[i]
+			}
+			return nil
+		},
+		Commit: func(_ context.Context, recs []*kgo.Record) error {
+			i := len(h.commits)
+			h.commits = append(h.commits, append([]*kgo.Record(nil), recs...))
+			h.events = append(h.events, "commit")
+			if i < len(h.commitErrs) {
+				return h.commitErrs[i]
 			}
 			return nil
 		},
@@ -208,7 +225,7 @@ func TestWriteRetriedUntilSuccess(t *testing.T) {
 	if !reflect.DeepEqual(h.waits, []time.Duration{time.Second, 2 * time.Second}) {
 		t.Errorf("waits = %v, want [1s 2s]", h.waits)
 	}
-	want := "poll,write,write,write,poll,write"
+	want := "poll,write,write,write,commit,poll,write,commit"
 	if got := strings.Join(h.events, ","); got != want {
 		t.Errorf("events = %s, want %s", got, want)
 	}
@@ -230,12 +247,13 @@ func TestBackoff(t *testing.T) {
 // Case 9
 func TestCancelDuringRetryStops(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	writes := 0
+	writes, commits := 0, 0
 	cfg := Config{
 		Poll: func(context.Context) ([]*kgo.Record, error) {
 			return []*kgo.Record{rec(t, pt(0), 0)}, nil
 		},
-		Write: func(context.Context, []model.Point) error { writes++; return errWrite },
+		Write:  func(context.Context, []model.Point) error { writes++; return errWrite },
+		Commit: func(context.Context, []*kgo.Record) error { commits++; return nil },
 		Wait: func(context.Context, time.Duration) error {
 			cancel() // shutdown arrives while waiting to retry
 			return context.Canceled
@@ -251,6 +269,9 @@ func TestCancelDuringRetryStops(t *testing.T) {
 	}
 	if writes != 1 {
 		t.Errorf("Write called %d times, want 1", writes)
+	}
+	if commits != 0 { // M3 commit case 3: an unwritten batch is never marked done
+		t.Errorf("Commit called %d times, want 0", commits)
 	}
 }
 
@@ -281,5 +302,93 @@ func TestCancelDuringPollReturns(t *testing.T) {
 		if strings.Contains(l, context.Canceled.Error()) {
 			t.Errorf("shutdown logged as an error: %q", l)
 		}
+	}
+}
+
+// M3 commit-after-write cases (docs/decisions/0007).
+
+var errCommit = errors.New("commit failed")
+
+func offsets(recs []*kgo.Record) []int64 {
+	out := make([]int64, len(recs))
+	for i, r := range recs {
+		out[i] = r.Offset
+	}
+	return out
+}
+
+// Commit case 1: a batch is marked done only after it is written, with the same records.
+func TestCommitAfterWrite(t *testing.T) {
+	recs := []*kgo.Record{rec(t, pt(0), 0), rec(t, pt(1), 1)}
+	h := run(t, []pollResult{{recs: recs}})
+	if got := strings.Join(h.events, ","); got != "poll,write,commit" {
+		t.Fatalf("events = %s, want poll,write,commit", got)
+	}
+	if !reflect.DeepEqual(offsets(h.commits[0]), []int64{0, 1}) {
+		t.Errorf("committed offsets %v, want [0 1]", offsets(h.commits[0]))
+	}
+}
+
+// Commit case 2: retries don't commit; the one commit follows the successful write.
+func TestCommitOnlyAfterSuccessfulRetry(t *testing.T) {
+	h := run(t, []pollResult{{recs: []*kgo.Record{rec(t, pt(0), 0)}}}, errWrite, errWrite)
+	if got := strings.Join(h.events, ","); got != "poll,write,write,write,commit" {
+		t.Fatalf("events = %s, want poll,write,write,write,commit", got)
+	}
+}
+
+// Commit case 4: a batch of only bad records is not written but is committed, so it isn't
+// re-read forever.
+func TestCommitPoisonOnlyBatch(t *testing.T) {
+	h := run(t, []pollResult{{recs: []*kgo.Record{badRec(3), badRec(4)}}})
+	if len(h.writes) != 0 {
+		t.Fatalf("Write called %d times, want 0", len(h.writes))
+	}
+	if len(h.commits) != 1 || !reflect.DeepEqual(offsets(h.commits[0]), []int64{3, 4}) {
+		t.Fatalf("commits = %v, want one commit of offsets [3 4]", h.commits)
+	}
+}
+
+// Commit case 5: skipped bad records are committed along with the written ones.
+func TestCommitIncludesSkippedRecords(t *testing.T) {
+	h := run(t, []pollResult{{recs: []*kgo.Record{rec(t, pt(0), 0), badRec(7), rec(t, pt(1), 1)}}})
+	if len(h.commits) != 1 || !reflect.DeepEqual(offsets(h.commits[0]), []int64{0, 7, 1}) {
+		t.Fatalf("commits = %v, want one commit of offsets [0 7 1]", h.commits)
+	}
+}
+
+// Commit case 6: a failed commit is logged and the loop goes on; the next commit covers it.
+func TestCommitErrorLoggedAndContinues(t *testing.T) {
+	h := runH(t, &harness{
+		polls:      []pollResult{{recs: []*kgo.Record{rec(t, pt(0), 0)}}, {recs: []*kgo.Record{rec(t, pt(1), 1)}}},
+		commitErrs: []error{errCommit},
+	})
+	if got := strings.Join(h.events, ","); got != "poll,write,commit,poll,write,commit" {
+		t.Fatalf("events = %s, want two full rounds", got)
+	}
+	found := false
+	for _, l := range h.logs {
+		if strings.Contains(l, errCommit.Error()) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("logs = %q, want the commit error", h.logs)
+	}
+}
+
+// Commit case 7: each batch gets its own commit, in order.
+func TestCommitPerBatchInOrder(t *testing.T) {
+	h := run(t, []pollResult{{recs: []*kgo.Record{rec(t, pt(0), 0)}}, {recs: []*kgo.Record{rec(t, pt(1), 1)}}})
+	if len(h.commits) != 2 || h.commits[0][0].Offset != 0 || h.commits[1][0].Offset != 1 {
+		t.Fatalf("commits = %v, want offsets 0 then 1", h.commits)
+	}
+}
+
+// An empty poll has nothing to mark done.
+func TestNoCommitForEmptyPoll(t *testing.T) {
+	h := run(t, []pollResult{{recs: nil}})
+	if len(h.commits) != 0 {
+		t.Fatalf("commits = %v, want none", h.commits)
 	}
 }
