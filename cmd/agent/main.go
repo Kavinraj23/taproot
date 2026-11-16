@@ -62,6 +62,7 @@ func main() {
 				envOr("TAPROOT_POSTGRES_USER", "monitoring_user"),
 				envOr("TAPROOT_POSTGRES_PASSWORD", "monitoring_password")),
 			"valkey": sensor.NewValkey(),
+			"kafka":  sensor.NewKafka(),
 		},
 		Emit: out.Emit,
 		Now:  time.Now,
