@@ -61,6 +61,7 @@ func main() {
 			"postgres": sensor.NewPostgres(
 				envOr("TAPROOT_POSTGRES_USER", "monitoring_user"),
 				envOr("TAPROOT_POSTGRES_PASSWORD", "monitoring_password")),
+			"valkey": sensor.NewValkey(),
 		},
 		Emit: out.Emit,
 		Now:  time.Now,
