@@ -28,8 +28,8 @@ for svc in agent processor; do
   [ "$st" = "running 0" ] && pass "A1 $svc running, 0 restarts" || fail "A1 $svc" "status/restarts = $st"
 done
 
-# A2. About one new row per second for this host.
-count="SELECT count() FROM taproot.metrics WHERE labels['host'] = '$HOST'"
+# A2. About one new host CPU row per second for this host (sensor points are checked by check-sensors.sh).
+count="SELECT count() FROM taproot.metrics WHERE metric = 'host_cpu_usage_percent' AND labels['host'] = '$HOST'"
 c1=$(q "$count"); sleep 10; c2=$(q "$count")
 if [[ "$c1" =~ ^[0-9]+$ && "$c2" =~ ^[0-9]+$ ]]; then
   d=$((c2 - c1))

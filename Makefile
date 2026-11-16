@@ -21,3 +21,4 @@ check:
 	bash scripts/check-pipeline.sh
 	bash scripts/check-grafana.sh
 	bash scripts/check-demo.sh
+	bash scripts/check-sensors.sh

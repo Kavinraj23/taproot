@@ -198,6 +198,19 @@ func containerIDFromCgroup(text string) string {
 	return id
 }
 
+var mountContainerRe = regexp.MustCompile(`/containers/([0-9a-f]{64})/`)
+
+// selfContainerID finds this process's own Docker container ID in /proc/self/mountinfo text.
+// Docker bind-mounts each container's hostname, hosts and resolv.conf from a directory named
+// after its ID. The cgroup can't be used for this: with a private cgroup namespace a process
+// sees its own cgroup as "/". "" when not running in a container.
+func selfContainerID(mountinfo string) string {
+	if m := mountContainerRe.FindStringSubmatch(mountinfo); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
 // parseStatPPID returns the parent PID from /proc/<pid>/stat text: "pid (comm) state ppid ...".
 // comm may contain spaces and parentheses, so the fields are read after the last ')'.
 func parseStatPPID(text string) (int, bool) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -26,6 +27,11 @@ type watchHarness struct {
 	steps   []step
 	changes []Changes
 	logs    []string
+
+	// Fake time for retries: every After call hands its channel to afters, and Now reads now.
+	afters chan chan time.Time
+	mu     sync.Mutex
+	now    time.Time
 }
 
 func startWatch(t *testing.T, steps ...step) *watchHarness {
@@ -36,6 +42,8 @@ func startWatch(t *testing.T, steps ...step) *watchHarness {
 		triggers: make(chan struct{}),
 		done:     make(chan struct{}),
 		steps:    steps,
+		afters:   make(chan chan time.Time, 100),
+		now:      time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	h.cancel = cancel
@@ -47,6 +55,12 @@ func startWatch(t *testing.T, steps ...step) *watchHarness {
 			Triggers: h.triggers,
 			OnChange: func(c Changes) { h.changes = append(h.changes, c) },
 			Logf:     func(f string, a ...any) { h.logs = append(h.logs, fmt.Sprintf(f, a...)) },
+			After: func(time.Duration) <-chan time.Time {
+				ch := make(chan time.Time, 1)
+				h.afters <- ch
+				return ch
+			},
+			Now: func() time.Time { h.mu.Lock(); defer h.mu.Unlock(); return h.now },
 		})
 	}()
 	t.Cleanup(func() { cancel(); <-h.done })
@@ -65,6 +79,26 @@ func (h *watchHarness) discover(context.Context) ([]Service, error) {
 
 func (h *watchHarness) tick()    { h.ticks <- time.Now() }
 func (h *watchHarness) trigger() { h.triggers <- struct{}{} }
+
+// setNow moves the fake clock to start + d.
+func (h *watchHarness) setNow(d time.Duration) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.now = time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC).Add(d)
+}
+
+// nextRetry waits for Watch to schedule a retry and returns its channel; nil if none comes.
+func (h *watchHarness) nextRetry() chan time.Time {
+	select {
+	case ch := <-h.afters:
+		return ch
+	case <-time.After(time.Second):
+		return nil
+	}
+}
+
+// pendingRetries counts retries scheduled but not yet taken; call after stop().
+func (h *watchHarness) pendingRetries() int { return len(h.afters) }
 
 // stop ends Watch and waits for it, so the recorded changes and logs are final.
 func (h *watchHarness) stop() {
@@ -153,5 +187,101 @@ func TestWatchReturnsWhenTicksClosed(t *testing.T) {
 	case <-h.done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Watch did not return after ticks closed")
+	}
+}
+
+func kafkaAt(port int) Service { return Service{Kind: "kafka", PID: 49061, Name: "java", Port: port} }
+
+func TestWatchRetriesSoonWhenPortMissing(t *testing.T) {
+	h := startWatch(t, step{svcs: []Service{kafkaAt(0)}}, step{svcs: []Service{kafkaAt(9092)}})
+	retry := h.nextRetry()
+	if retry == nil {
+		t.Fatal("no retry scheduled for a service without a port")
+	}
+	h.setNow(2 * time.Second)
+	retry <- time.Now() // no tick: the retry alone runs the second round
+	if h.nextRetry() != nil {
+		t.Error("retry scheduled after the port appeared")
+	}
+	h.stop()
+	if len(h.changes) != 2 || len(h.changes[1].Updated) != 1 || h.changes[1].Updated[0].Port != 9092 {
+		t.Errorf("changes = %+v, want added, then updated to port 9092", h.changes)
+	}
+}
+
+func TestWatchStopsRetryingAfterWindow(t *testing.T) {
+	// The initial round, 15 retries (2s, 4s, ... 30s), then one tick as a barrier.
+	steps := make([]step, 17)
+	for i := range steps {
+		steps[i] = step{svcs: []Service{kafkaAt(0)}}
+	}
+	h := startWatch(t, steps...)
+	retries := 0
+	for i := 1; ; i++ {
+		retry := h.nextRetry()
+		if retry == nil {
+			break
+		}
+		retries++
+		h.setNow(time.Duration(i) * 2 * time.Second)
+		retry <- time.Now()
+	}
+	h.setNow(40 * time.Second)
+	h.tick()
+	h.stop()
+	if retries != 15 {
+		t.Errorf("retries = %d, want 15 (every 2s for 30s)", retries)
+	}
+	if n := h.pendingRetries(); n != 0 {
+		t.Errorf("%d retries scheduled after the 30s window", n)
+	}
+}
+
+func TestWatchNoRetryWhenPortsKnown(t *testing.T) {
+	h := startWatch(t, step{svcs: []Service{kafkaAt(9092)}}, step{})
+	h.tick() // barrier: the first round is done
+	h.stop()
+	if n := h.pendingRetries(); n != 0 {
+		t.Errorf("%d retries scheduled with every port known", n)
+	}
+}
+
+func TestWatchNewPortlessServiceStartsNewWindow(t *testing.T) {
+	other := Service{Kind: "valkey", PID: 777, Name: "valkey-server"}
+	h := startWatch(t,
+		step{svcs: []Service{kafkaAt(0)}},        // t=0: window opens
+		step{svcs: []Service{kafkaAt(0)}},        // t=40s: window over, no retry
+		step{svcs: []Service{kafkaAt(0), other}}, // t=41s: a new port-less service, new window
+		step{},                                   // barrier
+	)
+	if h.nextRetry() == nil {
+		t.Fatal("no retry in the first window")
+	}
+	h.setNow(40 * time.Second)
+	h.tick()
+	h.setNow(41 * time.Second)
+	h.tick()
+	h.setNow(42 * time.Second)
+	h.tick()
+	h.stop()
+	if n := h.pendingRetries(); n != 1 {
+		t.Errorf("retries scheduled after the first window = %d, want 1 (for the new service)", n)
+	}
+}
+
+func TestWatchRetriesSoonWhenOnlyOtherPortOpen(t *testing.T) {
+	// Kafka opens its controller port 9093 before its client port 9092.
+	h := startWatch(t, step{svcs: []Service{kafkaAt(9093)}}, step{svcs: []Service{kafkaAt(9092)}})
+	retry := h.nextRetry()
+	if retry == nil {
+		t.Fatal("no retry scheduled for a service not yet on its usual port")
+	}
+	retry <- time.Now()
+	if h.nextRetry() != nil {
+		t.Error("retry scheduled once the usual port was open")
+	}
+	h.stop()
+	if len(h.changes) != 2 || len(h.changes[1].Updated) != 1 || h.changes[1].Updated[0].Port != 9092 {
+		t.Errorf("changes = %+v, want added on 9093, then updated to 9092", h.changes)
 	}
 }

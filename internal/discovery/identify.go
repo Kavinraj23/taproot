@@ -86,6 +86,21 @@ func match(p Process) (rule, bool) {
 	return rule{}, false
 }
 
+// Settled reports whether s is on its kind's usual port. A service still starting may list no
+// port yet, or only a secondary one (Kafka opens its controller port 9093 before 9092); it gets
+// measured once settled. Kinds without a usual port are settled with any port.
+func Settled(s Service) bool {
+	if s.Port == 0 {
+		return false
+	}
+	for _, r := range rules {
+		if r.kind == s.Kind {
+			return s.Port == r.defaultPort
+		}
+	}
+	return true
+}
+
 // pickPort prefers the kind's default port, then the lowest listening port, then 0.
 func pickPort(ports []int, defaultPort int) int {
 	if slices.Contains(ports, defaultPort) {

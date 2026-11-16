@@ -1,0 +1,606 @@
+{
+  "uid": "taproot-services",
+  "title": "Services",
+  "tags": [
+    "taproot"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "10s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "state-timeline",
+      "title": "Service up",
+      "description": "<service>_up per discovered instance: 1 while its sensor gets answers, 0 when measuring fails. A gap means the service wasn't discovered (stopped, or still starting).",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 6
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "taproot-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "taproot-clickhouse"
+          },
+          "editorType": "sql",
+          "queryType": "timeseries",
+          "format": 0,
+          "rawSql": "SELECT $__timeInterval(ts) AS time, concat(labels['service'], ' ', labels['instance']) AS series, min(value) AS value\nFROM taproot.metrics\nWHERE metric IN ('postgres_up', 'valkey_up', 'kafka_up') AND $__timeFilter(ts)\nGROUP BY time, series\nORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "displayName": "${__field.labels.series}",
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0
+          },
+          "min": 0,
+          "max": 1,
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "down",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "up",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showValue": "never",
+        "mergeValues": true,
+        "rowHeight": 0.8,
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Postgres connections",
+      "description": "Client connections by state (active, idle, idle in transaction), stacked; the dashed line is max_connections.",
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "taproot-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "taproot-clickhouse"
+          },
+          "editorType": "sql",
+          "queryType": "timeseries",
+          "format": 0,
+          "rawSql": "SELECT $__timeInterval(ts) AS time, labels['state'] AS series, avg(value) AS value\nFROM taproot.metrics\nWHERE metric IN ('postgres_connections') AND $__timeFilter(ts)\nGROUP BY time, series\nORDER BY time"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "taproot-clickhouse"
+          },
+          "editorType": "sql",
+          "queryType": "timeseries",
+          "format": 0,
+          "rawSql": "SELECT $__timeInterval(ts) AS time, 'max_connections' AS series, avg(value) AS value\nFROM taproot.metrics\nWHERE metric IN ('postgres_connections_max') AND $__timeFilter(ts)\nGROUP BY time, series\nORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "displayName": "${__field.labels.series}",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 40,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "max_connections"
+            },
+            "properties": [
+              {
+                "id": "custom.stacking",
+                "value": {
+                  "mode": "none"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Postgres transactions",
+      "description": "Commits and rollbacks per second across all databases.",
+      "gridPos": {
+        "x": 12,
+        "y": 6,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "taproot-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "taproot-clickhouse"
+          },
+          "editorType": "sql",
+          "queryType": "timeseries",
+          "format": 0,
+          "rawSql": "SELECT $__timeInterval(ts) AS time, replaceOne(replaceOne(metric, 'postgres_xact_', ''), '_per_sec', '') AS series, avg(value) AS value\nFROM taproot.metrics\nWHERE metric IN ('postgres_xact_commit_per_sec', 'postgres_xact_rollback_per_sec') AND $__timeFilter(ts)\nGROUP BY time, series\nORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "displayName": "${__field.labels.series}",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Valkey clients",
+      "description": "Connected and blocked clients.",
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "taproot-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "taproot-clickhouse"
+          },
+          "editorType": "sql",
+          "queryType": "timeseries",
+          "format": 0,
+          "rawSql": "SELECT $__timeInterval(ts) AS time, replaceOne(metric, 'valkey_', '') AS series, avg(value) AS value\nFROM taproot.metrics\nWHERE metric IN ('valkey_connected_clients', 'valkey_blocked_clients') AND $__timeFilter(ts)\nGROUP BY time, series\nORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "displayName": "${__field.labels.series}",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Valkey memory",
+      "description": "Memory used. maxmemory 0 means no limit, so it isn't drawn.",
+      "gridPos": {
+        "x": 12,
+        "y": 14,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "taproot-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "taproot-clickhouse"
+          },
+          "editorType": "sql",
+          "queryType": "timeseries",
+          "format": 0,
+          "rawSql": "SELECT $__timeInterval(ts) AS time, 'used' AS series, avg(value) AS value\nFROM taproot.metrics\nWHERE metric IN ('valkey_used_memory_bytes') AND $__timeFilter(ts)\nGROUP BY time, series\nORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "displayName": "${__field.labels.series}",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Valkey keyspace",
+      "description": "Cache hits and misses per second, and keys evicted for lack of memory.",
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "taproot-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "taproot-clickhouse"
+          },
+          "editorType": "sql",
+          "queryType": "timeseries",
+          "format": 0,
+          "rawSql": "SELECT $__timeInterval(ts) AS time, replaceOne(replaceOne(metric, 'valkey_', ''), '_per_sec', '') AS series, avg(value) AS value\nFROM taproot.metrics\nWHERE metric IN ('valkey_keyspace_hits_per_sec', 'valkey_keyspace_misses_per_sec', 'valkey_evicted_keys_per_sec') AND $__timeFilter(ts)\nGROUP BY time, series\nORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "displayName": "${__field.labels.series}",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Valkey commands",
+      "description": "Commands processed per second.",
+      "gridPos": {
+        "x": 12,
+        "y": 22,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "taproot-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "taproot-clickhouse"
+          },
+          "editorType": "sql",
+          "queryType": "timeseries",
+          "format": 0,
+          "rawSql": "SELECT $__timeInterval(ts) AS time, 'commands' AS series, avg(value) AS value\nFROM taproot.metrics\nWHERE metric IN ('valkey_commands_per_sec') AND $__timeFilter(ts)\nGROUP BY time, series\nORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "displayName": "${__field.labels.series}",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Kafka consumer lag",
+      "description": "Messages waiting per consumer group and topic (end of the topic minus the group's committed offset). Climbing lag means messages arrive faster than the group handles them: the kafkaQueueProblems scenario.",
+      "gridPos": {
+        "x": 0,
+        "y": 30,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "taproot-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "taproot-clickhouse"
+          },
+          "editorType": "sql",
+          "queryType": "timeseries",
+          "format": 0,
+          "rawSql": "SELECT $__timeInterval(ts) AS time, concat(labels['group'], ' / ', labels['topic']) AS series, max(value) AS value\nFROM taproot.metrics\nWHERE metric IN ('kafka_consumergroup_lag') AND $__timeFilter(ts)\nGROUP BY time, series\nORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "displayName": "${__field.labels.series}",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Kafka messages in vs consumed",
+      "description": "Messages written per second per topic, and committed (consumed) per second per group.",
+      "gridPos": {
+        "x": 12,
+        "y": 30,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "taproot-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "taproot-clickhouse"
+          },
+          "editorType": "sql",
+          "queryType": "timeseries",
+          "format": 0,
+          "rawSql": "SELECT $__timeInterval(ts) AS time, concat('in: ', labels['topic']) AS series, avg(value) AS value\nFROM taproot.metrics\nWHERE metric IN ('kafka_topic_messages_per_sec') AND $__timeFilter(ts)\nGROUP BY time, series\nORDER BY time"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "taproot-clickhouse"
+          },
+          "editorType": "sql",
+          "queryType": "timeseries",
+          "format": 0,
+          "rawSql": "SELECT $__timeInterval(ts) AS time, concat('consumed: ', labels['group']) AS series, avg(value) AS value\nFROM taproot.metrics\nWHERE metric IN ('kafka_consumergroup_consumed_per_sec') AND $__timeFilter(ts)\nGROUP BY time, series\nORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "displayName": "${__field.labels.series}",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    }
+  ]
+}

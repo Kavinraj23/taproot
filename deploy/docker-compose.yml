@@ -15,6 +15,7 @@ services:
       - --advertise-kafka-addr=internal://redpanda:29092,external://localhost:9092
     ports: ["9092:9092"]
     volumes: ["redpanda-data:/var/lib/redpanda/data"]
+    restart: unless-stopped # come back after a Docker Desktop restart
     mem_limit: 1g
     healthcheck:
       test: ["CMD-SHELL", "rpk cluster health | grep -Eq 'Healthy:.+true'"]
@@ -47,6 +48,7 @@ services:
     volumes: ["clickhouse-data:/var/lib/clickhouse"]
     ulimits:
       nofile: { soft: 262144, hard: 262144 }
+    restart: unless-stopped
     mem_limit: 1g
     healthcheck:
       test: ["CMD", "clickhouse-client", "--user", "taproot", "--password", "taproot", "-q", "SELECT 1"]
@@ -96,6 +98,7 @@ services:
       POSTGRES_DB: taproot
     ports: ["5433:5432"]  # 5433 so it doesn't clash with the demo's Postgres
     volumes: ["postgres-data:/var/lib/postgresql/data"]
+    restart: unless-stopped
     mem_limit: 256m
 
   grafana:
@@ -107,6 +110,7 @@ services:
     volumes:
       - grafana-data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning
+    restart: unless-stopped
     mem_limit: 256m
 
 volumes:

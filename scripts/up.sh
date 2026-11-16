@@ -41,8 +41,9 @@ done
 cat <<'EOF'
 
 Up.
-  Taproot Grafana  http://localhost:3001   (Dashboards > Taproot > Host CPU)
+  Taproot Grafana  http://localhost:3001   (Dashboards > Taproot > Services, Host CPU)
   Demo shop        http://localhost:8080
   Feature flags    http://localhost:8080/feature/
-Checks: bash scripts/check-pipeline.sh; bash scripts/check-grafana.sh; bash scripts/check-demo.sh
+Checks: bash scripts/check-pipeline.sh; bash scripts/check-grafana.sh; bash scripts/check-demo.sh;
+        bash scripts/check-sensors.sh
 EOF

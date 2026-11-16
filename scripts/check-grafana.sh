@@ -11,7 +11,6 @@ AUTH="${GRAFANA_AUTH:-admin:admin}"
 PLUGIN=grafana-clickhouse-datasource
 PLUGIN_VERSION=4.14.0
 DS_UID=taproot-clickhouse
-DASH_UID=taproot-host-cpu
 
 failed=0
 pass() { echo "PASS  $1"; }
@@ -37,32 +36,50 @@ v=$(get "/api/plugins/$PLUGIN/settings" | json "d['info']['version']")
 s=$(get "/api/datasources/uid/$DS_UID/health" | json "d.get('status')")
 [ "$s" = "OK" ] && pass "2 data source health" || fail "2 data source health" "status '${s:-missing}'"
 
-# 3. Dashboard provisioned into the Taproot folder.
-dash=$(get "/api/dashboards/uid/$DASH_UID")
-meta=$(echo "$dash" | json "'%s|%s' % (d['meta']['folderTitle'], d['meta']['provisioned'])")
-[ "$meta" = "Taproot|True" ] && pass "3 dashboard provisioned in Taproot" || fail "3 dashboard" "folder|provisioned = '${meta:-missing}'"
+# 3-5 for each dashboard: "uid|title".
+for d in "taproot-host-cpu|Host CPU" "taproot-services|Services"; do
+  uid=${d%%|*}; title=${d#*|}
 
-# 4. The dashboard's own panel query returns rows for the last 5 minutes.
-body=$(echo "$dash" | python -c "
+  # 3. Dashboard provisioned into the Taproot folder.
+  dash=$(get "/api/dashboards/uid/$uid")
+  meta=$(echo "$dash" | json "'%s|%s' % (d['meta']['folderTitle'], d['meta']['provisioned'])")
+  [ "$meta" = "Taproot|True" ] && pass "3 $title provisioned in Taproot" || fail "3 $title" "folder|provisioned = '${meta:-missing}'"
+
+  # 4. Every panel query returns rows for the last 5 minutes (catches misspelt metric names).
+  queries=$(echo "$dash" | python -c "
 import sys, json
 d = json.load(sys.stdin)
-q = dict(d['dashboard']['panels'][0]['targets'][0], refId='A', datasource={'uid': '$DS_UID'})
-print(json.dumps({'queries': [q], 'from': 'now-5m', 'to': 'now'}))" 2>/dev/null)
-if [ -z "$body" ]; then
-  fail "4 panel query" "could not read the panel query from the dashboard"
-else
-  res=$(curl -s -u "$AUTH" -H 'Content-Type: application/json' "$URL/api/ds/query" --data-binary "$body")
-  out=$(echo "$res" | json "'%s|%d' % (d['results']['A'].get('error', ''), sum(len(f['data']['values'][0]) for f in d['results']['A'].get('frames', []) if f['data']['values']))")
-  err=${out%|*}; rows=${out##*|}
-  if [ -z "$out" ]; then fail "4 panel query" "unexpected response: $(echo "$res" | head -c 300)"
-  elif [ -n "$err" ]; then fail "4 panel query" "$err"
-  elif [ "$rows" -lt 1 ]; then fail "4 panel query" "no rows in the last 5 minutes (is the pipeline running?)"
-  else pass "4 panel query returned $rows rows"; fi
-fi
+for p in d['dashboard']['panels']:
+    for t in p['targets']:
+        q = dict(t, refId='A', datasource={'uid': '$DS_UID'})
+        name = p['title'] + (' (%s)' % t['refId'] if len(p['targets']) > 1 else '')
+        print(name + '	' + json.dumps({'queries': [q], 'from': 'now-5m', 'to': 'now'}))" 2>/dev/null)
+  if [ -z "$queries" ]; then
+    fail "4 $title panel queries" "could not read the panel queries from the dashboard"
+  fi
+  while IFS=$'	' read -r ptitle body; do
+    [ -z "$body" ] && continue
+    res=""
+    for _ in 1 2 3; do # retry a blank answer, as get() does
+      res=$(curl -s -m 10 -u "$AUTH" -H 'Content-Type: application/json' "$URL/api/ds/query" --data-binary "$body")
+      [ -n "$res" ] && break
+      sleep 1
+    done
+    out=$(echo "$res" | json "'%s|%d' % (d['results']['A'].get('error', ''), sum(len(f['data']['values'][0]) for f in d['results']['A'].get('frames', []) if f['data']['values']))")
+    err=${out%|*}; rows=${out##*|}
+    if [ -z "$out" ]; then fail "4 $title / $ptitle" "unexpected response: $(echo "$res" | head -c 300)"
+    elif [ -n "$err" ]; then fail "4 $title / $ptitle" "$err"
+    elif [ "$rows" -lt 1 ]; then fail "4 $title / $ptitle" "no rows in the last 5 minutes (is the pipeline running?)"
+    else pass "4 $title / $ptitle returned $rows rows"; fi
+  done <<< "$queries"
 
-# 5. Exactly one of each, so restarts don't duplicate provisioned objects.
+  # 5. Exactly one of each dashboard, so restarts don't duplicate provisioned objects.
+  n=$(get "/api/search?query=$(echo "$title" | sed 's/ /%20/g')&type=dash-db" | json "sum(1 for x in d if x['title'] == '$title')")
+  [ "$n" = "1" ] && pass "5 one $title dashboard" || fail "5 $title duplicates" "$n dashboards"
+done
+
+# 5. One data source.
 nds=$(get "/api/datasources" | json "sum(1 for x in d if x['type'] == '$PLUGIN')")
-ndash=$(get "/api/search?query=Host%20CPU&type=dash-db" | json "sum(1 for x in d if x['title'] == 'Host CPU')")
-[ "$nds" = "1" ] && [ "$ndash" = "1" ] && pass "5 one data source, one dashboard" || fail "5 duplicates" "$nds data sources, $ndash dashboards"
+[ "$nds" = "1" ] && pass "5 one data source" || fail "5 data source duplicates" "$nds data sources"
 
 exit $failed

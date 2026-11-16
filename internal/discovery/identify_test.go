@@ -159,3 +159,21 @@ func TestIdentify(t *testing.T) {
 		})
 	}
 }
+
+func TestSettled(t *testing.T) {
+	cases := []struct {
+		s    Service
+		want bool
+	}{
+		{Service{Kind: "kafka", Port: 9092}, true},
+		{Service{Kind: "kafka", Port: 9093}, false}, // controller port open, client port not yet
+		{Service{Kind: "kafka", Port: 0}, false},
+		{Service{Kind: "postgres", Port: 5432}, true},
+		{Service{Kind: "unknown", Port: 1234}, true}, // no usual port to wait for
+	}
+	for _, c := range cases {
+		if got := Settled(c.s); got != c.want {
+			t.Errorf("Settled(%s on %d) = %v, want %v", c.s.Kind, c.s.Port, got, c.want)
+		}
+	}
+}

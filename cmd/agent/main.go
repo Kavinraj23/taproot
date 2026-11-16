@@ -92,6 +92,12 @@ func main() {
 // runDiscovery keeps the service list current: a full rescan every interval, plus an early one
 // shortly after Docker reports a container starting or stopping. onChange gets every change.
 func runDiscovery(ctx context.Context, procFS fs.FS, dc *docker.Client, interval time.Duration, onChange func(discovery.Changes)) {
+	if cs, err := dc.Containers(ctx); err == nil {
+		if own := discovery.OwnProject(procFS, cs); own != "" {
+			log.Printf("skipping services in own compose project %q", own)
+		}
+	}
+
 	triggers := make(chan struct{}, 1)
 	go discovery.Ring(ctx, dc.Events, triggers, 2*time.Second, log.Printf, time.Second)
 
