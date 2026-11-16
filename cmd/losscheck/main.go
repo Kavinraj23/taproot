@@ -177,7 +177,7 @@ func heartbeats(stored []losscheck.Stored) map[string][]time.Time {
 		if s.Metric != "host_cpu_usage_percent" && !strings.HasSuffix(s.Metric, "_up") {
 			continue
 		}
-		k := s.Metric + fmt.Sprint(s.Labels) // fmt prints maps sorted by key
+		k := losscheck.Series(s.Metric, s.Labels)
 		out[k] = append(out[k], s.TS)
 	}
 	return out
@@ -186,7 +186,7 @@ func heartbeats(stored []losscheck.Stored) map[string][]time.Time {
 func distinct(pts []model.Point) int {
 	seen := map[string]bool{}
 	for _, p := range pts {
-		seen[p.Metric+fmt.Sprint(p.Labels)+p.Timestamp.Format(time.RFC3339Nano)] = true
+		seen[losscheck.ID(p.Metric, p.Labels, p.Timestamp)] = true
 	}
 	return len(seen)
 }

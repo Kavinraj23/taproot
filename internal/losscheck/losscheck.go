@@ -6,13 +6,14 @@
 // Losses before Redpanda (the agent dropping points) never reach Redpanda, so they are
 // found separately, as long silences in series that report every tick (Gaps).
 //
-// This is verification code only. Its idea of "the same point" is private and is not
-// the pipeline's dedup key.
+// This is verification code only. Its idea of "the same point" (ID) is for checking and
+// is not the pipeline's dedup key.
 package losscheck
 
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,8 +57,9 @@ type Report struct {
 // OK is true when nothing was lost, nothing was stored twice, and no heartbeat went silent.
 func (r Report) OK() bool { return r.Missing == 0 && r.Duplicates == 0 && len(r.Gaps) == 0 }
 
-// series names a series: metric plus labels sorted by name, e.g. cpu{host=a,zone=b}.
-func series(metric string, labels map[string]string) string {
+// Series names a series: metric plus labels sorted by name, values quoted, e.g.
+// cpu{host="a",zone="b"}. Quoting keeps a value like "1,b=2" from reading as two labels.
+func Series(metric string, labels map[string]string) string {
 	names := make([]string, 0, len(labels))
 	for n := range labels {
 		names = append(names, n)
@@ -70,15 +72,15 @@ func series(metric string, labels map[string]string) string {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		b.WriteString(n + "=" + labels[n])
+		b.WriteString(n + "=" + strconv.Quote(labels[n]))
 	}
 	b.WriteByte('}')
 	return b.String()
 }
 
-// id is one point's identity for this check: its series plus its exact timestamp.
-func id(metric string, labels map[string]string, ts time.Time) string {
-	return series(metric, labels) + "@" + ts.UTC().Format(time.RFC3339Nano)
+// ID is one point's identity for this check: its series plus its exact timestamp.
+func ID(metric string, labels map[string]string, ts time.Time) string {
+	return Series(metric, labels) + "@" + ts.UTC().Format(time.RFC3339Nano)
 }
 
 // Compare counts points Redpanda holds that ClickHouse lacks (missing) and extra stored
@@ -87,14 +89,14 @@ func id(metric string, labels map[string]string, ts time.Time) string {
 func Compare(sent []model.Point, stored []Stored) (missing, dups int, sample []string) {
 	have := make(map[string]bool, len(stored))
 	for _, s := range stored {
-		have[id(s.Metric, s.Labels, s.TS)] = true
+		have[ID(s.Metric, s.Labels, s.TS)] = true
 		if s.Copies > 1 {
 			dups += int(s.Copies - 1)
 		}
 	}
 	seen := make(map[string]bool, len(sent))
 	for _, p := range sent {
-		k := id(p.Metric, p.Labels, p.Timestamp)
+		k := ID(p.Metric, p.Labels, p.Timestamp)
 		if seen[k] {
 			continue
 		}

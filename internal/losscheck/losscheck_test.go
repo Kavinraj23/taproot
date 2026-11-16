@@ -39,8 +39,8 @@ func TestCompareMissing(t *testing.T) {
 	if missing != 1 || dups != 0 {
 		t.Fatalf("missing %d dups %d, want 1 0", missing, dups)
 	}
-	if len(sample) != 1 || !strings.Contains(sample[0], "cpu{host=a}") || !strings.Contains(sample[0], "12:00:01") {
-		t.Fatalf("sample %q should name cpu{host=a} at 12:00:01", sample)
+	if len(sample) != 1 || !strings.Contains(sample[0], `cpu{host="a"}`) || !strings.Contains(sample[0], "12:00:01") {
+		t.Fatalf("sample %q should name cpu{host=\"a\"} at 12:00:01", sample)
 	}
 }
 
@@ -176,5 +176,15 @@ func TestGapsUnsortedInput(t *testing.T) {
 	b := Gaps(map[string][]time.Time{"x": rev}, 5*time.Second)
 	if !reflect.DeepEqual(a, b) || len(a) != 1 {
 		t.Fatalf("sorted %v, unsorted %v", a, b)
+	}
+}
+
+// A (user's pick): a label value containing "," and "=" must not pass for two separate labels.
+// {a: "1,b=2"} and {a: "1", b: "2"} are different series, so the point is missing.
+func TestCompareLabelValueLooksLikeTwoLabels(t *testing.T) {
+	sent := []model.Point{pt("m", map[string]string{"a": "1,b=2"}, t0)}
+	stored := []Stored{st("m", map[string]string{"a": "1", "b": "2"}, t0, 1)}
+	if missing, _, _ := Compare(sent, stored); missing != 1 {
+		t.Fatalf("missing %d, want 1: the two label sets were treated as the same series", missing)
 	}
 }
