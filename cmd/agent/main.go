@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"taproot/internal/docker"
 	"taproot/internal/sensor"
 	"taproot/internal/sink"
+	"taproot/internal/spool"
 )
 
 func main() {
@@ -50,11 +52,24 @@ func main() {
 	if err != nil {
 		log.Fatalf("redpanda client: %v", err)
 	}
-	out := sink.New(client, log.Printf)
-	defer out.Close(5 * time.Second)
+	bufDir := envOr("TAPROOT_BUFFER_DIR", "/var/lib/taproot/buffer")
+	maxMB, err := strconv.Atoi(envOr("TAPROOT_BUFFER_MAX_MB", "256"))
+	if err != nil || maxMB <= 0 {
+		log.Fatalf("TAPROOT_BUFFER_MAX_MB: want a positive number of megabytes, got %q", os.Getenv("TAPROOT_BUFFER_MAX_MB"))
+	}
+	buf, err := spool.Open(bufDir, spool.Options{MaxBytes: int64(maxMB) << 20, Logf: log.Printf})
+	if err != nil {
+		log.Fatalf("disk buffer: %v", err)
+	}
+	if n := buf.Pending(); n > 0 {
+		log.Printf("disk buffer: %d points from before the restart still to send", n)
+	}
+	out := sink.New(client, buf, log.Printf)
+	defer out.Close(5 * time.Second) // runs after stop(): Run has seen ctx end
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go out.Run(ctx)
 
 	sensors := sensor.NewManager(sensor.ManagerConfig{
 		Factories: map[string]sensor.Factory{
@@ -79,7 +94,7 @@ func main() {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
-	log.Printf("agent on %s sending to %s at %v", host, topic, brokers)
+	log.Printf("agent on %s sending to %s at %v, buffering in %s (cap %d MB)", host, topic, brokers, bufDir, maxMB)
 	agent.Run(ctx, ticker.C, agent.Config{
 		Read: func() (cpu.Times, error) { return cpu.Read("/proc/stat") },
 		Now:  time.Now,

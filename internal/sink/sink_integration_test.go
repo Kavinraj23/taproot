@@ -14,6 +14,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"taproot/internal/model"
+	"taproot/internal/spool"
 )
 
 // Run with: TAPROOT_BROKERS=localhost:9092 go test -tags integration ./internal/sink/
@@ -30,7 +31,13 @@ func TestProduceToRedpanda(t *testing.T) {
 	if err != nil {
 		t.Fatalf("client: %v", err)
 	}
-	s := New(cl, t.Logf)
+	sp, err := spool.Open(t.TempDir(), spool.Options{Logf: t.Logf})
+	if err != nil {
+		t.Fatalf("spool: %v", err)
+	}
+	s := New(cl, sp, t.Logf)
+	runCtx, stopRun := context.WithCancel(context.Background())
+	go s.Run(runCtx)
 
 	base := time.Date(2026, 11, 11, 9, 30, 0, 0, time.UTC)
 	var want []model.Point
@@ -44,10 +51,16 @@ func TestProduceToRedpanda(t *testing.T) {
 		want = append(want, p)
 		s.Emit(p)
 	}
-	s.Close(10 * time.Second)
-	if s.dropped != 0 {
-		t.Fatalf("dropped %d points", s.dropped)
+	// Every point confirmed by Redpanda leaves the disk backlog.
+	deadline := time.Now().Add(15 * time.Second)
+	for sp.Pending() > 0 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
 	}
+	if n := sp.Pending(); n != 0 {
+		t.Fatalf("%d points still unconfirmed", n)
+	}
+	stopRun()
+	s.Close(10 * time.Second)
 
 	consumer, err := kgo.NewClient(kgo.SeedBrokers(seeds...), kgo.ConsumeTopics(topic),
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()))
