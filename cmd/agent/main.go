@@ -65,7 +65,10 @@ func main() {
 		log.Printf("disk buffer: %d points from before the restart still to send", n)
 	}
 	out := sink.New(client, buf, log.Printf)
-	defer out.Close(5 * time.Second) // runs after stop(): Run has seen ctx end
+	// Runs after stop(), once Run has seen ctx end. A short wait is enough: anything Redpanda
+	// hasn't confirmed stays on disk and is sent on the next start, and a long wait only
+	// lengthens the stretch with no measurements while the agent restarts.
+	defer out.Close(time.Second)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
