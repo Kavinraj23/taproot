@@ -1,4 +1,4 @@
-.PHONY: build test lint up down check
+.PHONY: build test lint up down check loss
 
 build:
 	go build ./...
@@ -22,3 +22,8 @@ check:
 	bash scripts/check-grafana.sh
 	bash scripts/check-demo.sh
 	bash scripts/check-sensors.sh
+
+# Lost or duplicated points over the last 10 minutes (M3). Not in check until M3 makes it pass.
+# Outage scenarios: bash scripts/check-loss.sh --outage processor|clickhouse|redpanda|redpanda-agent
+loss:
+	bash scripts/check-loss.sh
