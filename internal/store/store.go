@@ -19,6 +19,9 @@ type Config struct {
 	Password string
 	Database string
 	Table    string
+	// SpanTable is the spans table (M4); empty means "spans". Its trace index is named after
+	// it: spans_trace_index.
+	SpanTable string
 }
 
 // Store is a ClickHouse connection bound to one metrics table.

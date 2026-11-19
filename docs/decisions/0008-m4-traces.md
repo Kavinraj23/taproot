@@ -1,0 +1,15 @@
+# 0008: Traces (M4): spans through the agent, span tables, dedup by trace and span ID
+
+- **Decision:**
+  - **Span path.** demo services → the demo's OTel collector → the Taproot agent (an OTLP receiver) → a disk spool → Redpanda topic `taproot.spans` → the processor → ClickHouse. The collector gets an exporter to the agent through the demo's own extension seam, `otelcol-config-extras.yml`. The agent answers a span export only after the spans are in its spool. (Built in tasks 2–3.)
+  - **Span model** (`model.Span`): trace ID, span ID, parent span ID (lowercase hex), service, name, kind, start (ns), duration, status (unset/ok/error), span attributes and resource attributes as string maps. Events and links are left out for now.
+  - **Storage** (design section 5, option C). `spans` is a MergeTree sorted by `(service, start)` and partitioned by day. `spans_trace_index` (AggregatingMergeTree, `ORDER BY trace_id`) holds each trace's earliest start and latest end. A materialized view fills it from `spans`. A trace lookup reads the index first, then only that time slice of `spans`. Both tables keep 48 hours, like raw metrics (decision 0006).
+  - **Dedup.** A span's identity is `model.Span.Key`: trace ID plus span ID, because a span ID is only unique inside its trace. `store.InsertNewSpans` follows `InsertNew` (decision 0007): drop repeats in the batch, look up which keys are already stored (one query over the batch's services and start range, using the sort key), and insert only the rest.
+- **Why:**
+  - *Through the agent, not the collector's Kafka exporter straight into Redpanda:* design section 5 (Transport) has agents send to the queue and buffer locally on disk. Going through the agent reuses M3's lossless spool. The collector only buffers in memory, and it would skip the agent the design (and Instana's model) puts on every host. The cost is an OTLP receiver in the agent. Between the collector and the agent, the collector's own retry queue (in memory) covers short agent restarts.
+  - *Index table, not a skip index on trace_id:* this is what design section 5 chose. RED metrics and the engine read by service and time, and the small index keeps trace lookups cheap.
+  - *Min/max in the index:* repeats don't change a min or a max, so the index can't be skewed by a duplicate even before dedup.
+  - *Volume:* about 5–11 spans/s at the demo's default load (`docs/experiments/2026-11-18-span-volume.md`), so one lookup per batch costs little.
+- **Ownership:** on 2026-11-18 the user extended the decision 0007 waiver of hand-written piece 2 to span dedup. Claude wrote `InsertNewSpans` and explains it back at the end of M4, together with the M3 explain-back. Piece 1 (context propagation in the Python worker, task 6) stays hand-written.
+- **Naming:** the plan called the index `trace_index`. It is named after its spans table (`spans_trace_index`), so tests can create their own pairs side by side.
+- **Replaces:** Nothing. Adds detail to design.md section 5 (Transport, Trace assembly, Storage, and "Data arriving twice") and section 9 (ownership).
