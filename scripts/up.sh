@@ -17,9 +17,13 @@ echo "Starting OpenTelemetry demo..."
 # stack (OpenSearch, Jaeger, Prometheus, Grafana) duplicates Taproot and doesn't fit in the
 # 6 GB Docker cap alongside it (docs/decisions/0004-demo-without-observability-stack.md).
 # DEMO_VERSION in the environment beats the env files, so images are pinned even on a fresh clone.
+# OTEL_COLLECTOR_CONFIG_EXTRAS swaps the demo's empty collector extras file for Taproot's, which
+# sends spans to the agent (docs/decisions/0008). Relative to the demo dir, so the path works the
+# same from Git Bash and Linux.
+EXTRAS="$(realpath --relative-to="$DEMO_DIR" "$ROOT/deploy/otel-demo/otelcol-config-extras.yml")"
 (
   cd "$DEMO_DIR"
-  DEMO_VERSION=3.1.0 docker compose --env-file .env --env-file .env.override \
+  DEMO_VERSION=3.1.0 OTEL_COLLECTOR_CONFIG_EXTRAS="./$EXTRAS" docker compose --env-file .env --env-file .env.override \
     -f compose.yaml -f compose.full.yaml -f compose.extras.yaml \
     -f "$ROOT/deploy/otel-demo/compose.taproot.yaml" \
     up -d --remove-orphans
@@ -27,8 +31,10 @@ echo "Starting OpenTelemetry demo..."
 
 # The agent's sensors reach the demo's Postgres, Valkey and Kafka by container name, so the
 # agent joins the demo's network too (docs/decisions/0005-sensor-reach-and-postgres-login.md).
-# Already connected is fine.
-docker network connect opentelemetry-demo deploy-agent-1 2>/dev/null || true
+# The collector sends spans to it as taproot-agent:4318 (M4). An agent already connected without
+# that alias keeps its old connection, so reconnect it every time.
+docker network disconnect opentelemetry-demo deploy-agent-1 2>/dev/null || true
+docker network connect --alias taproot-agent opentelemetry-demo deploy-agent-1
 
 echo "Waiting for the demo shop..."
 for _ in $(seq 1 60); do

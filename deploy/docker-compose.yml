@@ -24,7 +24,8 @@ services:
       retries: 12
 
   # Creates Taproot's topics once Redpanda is up, so nothing relies on auto-creation.
-  # Keyed by series, so 3 partitions still keep each series in order.
+  # taproot.metrics is keyed by series and taproot.spans by trace ID, so 3 partitions still
+  # keep each series (and each trace) in order. Every topic must come out OK or already exist.
   redpanda-init:
     image: docker.redpanda.com/redpandadata/redpanda:v24.3.11
     depends_on:
@@ -32,9 +33,11 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >-
-        out=$$(rpk topic create taproot.metrics -p 3 -X brokers=redpanda:29092 2>&1);
-        echo "$$out";
-        echo "$$out" | grep -Eq 'OK|TOPIC_ALREADY_EXISTS'
+        for t in taproot.metrics taproot.spans; do
+          out=$$(rpk topic create $$t -p 3 -X brokers=redpanda:29092 2>&1);
+          echo "$$out";
+          echo "$$out" | grep -Eq 'OK|TOPIC_ALREADY_EXISTS' || exit 1;
+        done
     restart: "no"
 
   clickhouse:

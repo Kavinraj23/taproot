@@ -1,0 +1,20 @@
+# Taproot's layer on the demo's OTel collector (demo 3.1.0). scripts/up.sh mounts this file in
+# place of the demo's empty src/otel-collector/otelcol-config-extras.yml, which is the demo's
+# own seam for adding a backend. Nothing in ../otel-demo is edited.
+#
+# Sends every span to the Taproot agent's OTLP receiver (docs/decisions/0008). The agent
+# answers only once the spans are in its disk buffer; until then the collector keeps them in
+# its in-memory queue and retries (both on by default), which covers an agent restart.
+#
+# The collector replaces lists rather than appending to them, so the pipeline repeats the
+# demo's own trace exporters (debug, span_metrics) next to Taproot's.
+
+exporters:
+  otlp_http/taproot:
+    endpoint: http://taproot-agent:4318
+    # gzip is the default; the agent unpacks it.
+
+service:
+  pipelines:
+    traces:
+      exporters: [debug, span_metrics, otlp_http/taproot]

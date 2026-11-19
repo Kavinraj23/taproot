@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io/fs"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -18,6 +20,8 @@ import (
 	"taproot/internal/cpu"
 	"taproot/internal/discovery"
 	"taproot/internal/docker"
+	"taproot/internal/model"
+	"taproot/internal/otlp"
 	"taproot/internal/sensor"
 	"taproot/internal/sink"
 	"taproot/internal/spool"
@@ -70,9 +74,51 @@ func main() {
 	// lengthens the stretch with no measurements while the agent restarts.
 	defer out.Close(time.Second)
 
+	// Spans (M4) get their own topic and their own disk buffer, so a flood of one can't push
+	// the other out of the buffer. The folder sits inside the metrics buffer's volume; the
+	// metrics spool only looks at *.seg files, so it ignores it.
+	spanClient, err := sink.NewClient(brokers, spanTopic)
+	if err != nil {
+		log.Fatalf("redpanda client (spans): %v", err)
+	}
+	spanDir := envOr("TAPROOT_SPAN_BUFFER_DIR", "/var/lib/taproot/buffer/spans")
+	spanMaxMB, err := strconv.Atoi(envOr("TAPROOT_SPAN_BUFFER_MAX_MB", "256"))
+	if err != nil || spanMaxMB <= 0 {
+		log.Fatalf("TAPROOT_SPAN_BUFFER_MAX_MB: want a positive number of megabytes, got %q", os.Getenv("TAPROOT_SPAN_BUFFER_MAX_MB"))
+	}
+	spanBuf, err := spool.Open(spanDir, spool.Options{MaxBytes: int64(spanMaxMB) << 20, Logf: log.Printf})
+	if err != nil {
+		log.Fatalf("span disk buffer: %v", err)
+	}
+	if n := spanBuf.Pending(); n > 0 {
+		log.Printf("span disk buffer: %d spans from before the restart still to send", n)
+	}
+	spanOut := sink.New(spanClient, spanBuf, log.Printf)
+	defer spanOut.Close(time.Second)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go out.Run(ctx)
+	go spanOut.Run(ctx)
+
+	otlpAddr := envOr("TAPROOT_OTLP_ADDR", ":4318")
+	otlpServer := &http.Server{
+		Addr:              otlpAddr,
+		Handler:           otlp.Handler(appendSpans(spanOut), log.Printf),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() {
+		if err := otlpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("otlp receiver: %v", err)
+		}
+	}()
+	log.Printf("receiving OTLP spans on %s, sending to %s, buffering in %s (cap %d MB)", otlpAddr, spanTopic, spanDir, spanMaxMB)
+	// Stop taking spans before the span buffer closes (deferred above, so it runs after this).
+	defer func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		otlpServer.Shutdown(shutCtx)
+	}()
 
 	sensors := sensor.NewManager(sensor.ManagerConfig{
 		Factories: map[string]sensor.Factory{
@@ -181,4 +227,25 @@ func envOr(name, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// spanTopic is where the agent sends spans; the processor reads it in task 3.
+const spanTopic = "taproot.spans"
+
+// appendSpans puts spans on disk, keyed by trace ID so one trace's spans share a partition.
+// It stops at the first failure: the receiver then answers 503, the collector resends the
+// whole export, and the spans already written are stored twice and dropped by dedup.
+func appendSpans(out *sink.Sink) func([]model.Span) error {
+	return func(spans []model.Span) error {
+		for _, sp := range spans {
+			v, err := json.Marshal(sp)
+			if err != nil {
+				return fmt.Errorf("encode span %s: %w", sp.Key(), err)
+			}
+			if err := out.Append([]byte(sp.TraceID), v); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 }

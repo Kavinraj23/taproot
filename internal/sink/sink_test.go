@@ -388,3 +388,38 @@ func TestFrameRoundTrip(t *testing.T) {
 		t.Error("want error for a key longer than the record")
 	}
 }
+
+// Case 14 (M4): Append reports a failed disk write to its caller, so the OTLP receiver can
+// tell the collector to retry. Emit still only logs.
+func TestAppendReturnsSpoolError(t *testing.T) {
+	sp, err := spool.Open(t.TempDir(), spool.Options{Logf: t.Logf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lg := &logs{}
+	s := New(newFake(), sp, lg.logf)
+	if err := sp.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append([]byte("k"), []byte("v")); !errors.Is(err, spool.ErrClosed) {
+		t.Errorf("Append on a closed spool = %v, want spool.ErrClosed", err)
+	}
+	s.Emit(pointAt(0)) // must not panic or return anything
+	if lg.count("disk buffer write failing") != 1 {
+		t.Errorf("logs = %q, want one append failure", lg.lines)
+	}
+}
+
+// Case 15 (M4): a record appended by key and value is sent unchanged.
+func TestAppendIsSentFromDisk(t *testing.T) {
+	r := newRig(t, t.TempDir())
+	defer r.stop()
+	if err := r.s.Append([]byte("4bf92f3577b34da6a3ce929d0e0e4736"), []byte(`{"span_id":"aaa1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	r.fp.waitProduced(t, 1)
+	rec := r.fp.record(0)
+	if string(rec.Key) != "4bf92f3577b34da6a3ce929d0e0e4736" || string(rec.Value) != `{"span_id":"aaa1"}` {
+		t.Errorf("record = %q / %q", rec.Key, rec.Value)
+	}
+}

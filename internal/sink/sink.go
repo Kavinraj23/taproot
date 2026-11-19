@@ -130,24 +130,32 @@ func New(p producer, sp *spool.Spool, logf func(format string, args ...any)) *Si
 	return &Sink{p: p, sp: sp, logf: logf, done: make(chan struct{})}
 }
 
-// Emit writes one point to the disk buffer. It returns straight away.
+// Emit writes one point to the disk buffer. It returns straight away; a failed write is
+// logged (once per episode) and the point dropped, since the sensor can't do anything better.
 func (s *Sink) Emit(pt model.Point) {
 	r, err := Encode(pt)
 	if err != nil {
 		s.logf("drop point %s: %v", pt.Metric, err)
 		return
 	}
-	err = s.sp.Append(frame(r.Key, r.Value))
+	s.Append(r.Key, r.Value)
+}
+
+// Append writes one record (Redpanda key and value) to the disk buffer and says whether it
+// got there. The OTLP receiver uses the error to tell the collector to retry (M4).
+func (s *Sink) Append(key, value []byte) error {
+	err := s.sp.Append(frame(key, value))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch {
 	case err != nil && !s.appendFailing:
 		s.appendFailing = true
-		s.logf("disk buffer write failing, dropping points: %v", err)
+		s.logf("disk buffer write failing (points dropped, spans refused for the collector to retry): %v", err)
 	case err == nil && s.appendFailing:
 		s.appendFailing = false
 		s.logf("disk buffer write recovered")
 	}
+	return err
 }
 
 // Run sends buffered points to Redpanda until ctx is done, oldest first, and saves progress

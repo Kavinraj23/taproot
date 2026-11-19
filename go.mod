@@ -7,6 +7,7 @@ require (
 	github.com/jackc/pgx/v5 v5.13.0
 	github.com/twmb/franz-go v1.22.3
 	github.com/twmb/franz-go/pkg/kadm v1.20.0
+	go.opentelemetry.io/collector/pdata v1.71.0
 )
 
 require (
@@ -16,16 +17,26 @@ require (
 	github.com/go-faster/city v1.0.1 // indirect
 	github.com/go-faster/errors v0.8.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/hashicorp/go-version v1.9.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
+	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/compress v1.20.3 // indirect
+	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
+	github.com/modern-go/reflect2 v1.0.3-0.20250322232337-35a7c28c31ee // indirect
 	github.com/paulmach/orb v0.14.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.33 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/shopspring/decimal v1.6.0 // indirect
 	github.com/twmb/franz-go/pkg/kmsg v1.15.1 // indirect
+	go.opentelemetry.io/collector/featuregate v1.71.0 // indirect
 	go.opentelemetry.io/otel v1.47.0 // indirect
 	go.opentelemetry.io/otel/trace v1.47.0 // indirect
+	go.uber.org/multierr v1.11.0 // indirect
+	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
-	golang.org/x/text v0.41.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260817212433-ac3dfec99bb1 // indirect
+	google.golang.org/grpc v1.85.0 // indirect
+	google.golang.org/protobuf v1.36.12 // indirect
 )
