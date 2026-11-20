@@ -16,13 +16,57 @@ import (
 
 const maxBackoff = 30 * time.Second
 
-// Config holds everything Run depends on, so tests can swap in fakes.
-type Config struct {
+// Loop holds everything Run depends on, so tests can swap in fakes. T is what one record
+// decodes to: a metric point or (M4) a span. The rules are the same for both.
+type Loop[T any] struct {
 	Poll   func(ctx context.Context) ([]*kgo.Record, error)    // one fetch from Redpanda
-	Write  func(ctx context.Context, pts []model.Point) error  // one batch insert
+	Decode func(r *kgo.Record) (T, error)                      // one record; an error skips it
+	Write  func(ctx context.Context, items []T) error          // one batch insert
 	Commit func(ctx context.Context, recs []*kgo.Record) error // mark records done in Redpanda
 	Wait   func(ctx context.Context, d time.Duration) error    // sleep d, or return ctx's error
 	Logf   func(format string, args ...any)
+}
+
+// Config is the metrics loop, the processor's original job.
+type Config = Loop[model.Point]
+
+// DecodeSpan turns a record into a span, rejecting records that couldn't be stored or
+// deduplicated: the agent writes IDs as lowercase hex (internal/otlp), so anything else is
+// corruption.
+func DecodeSpan(r *kgo.Record) (model.Span, error) {
+	var s model.Span
+	if err := json.Unmarshal(r.Value, &s); err != nil {
+		return s, fmt.Errorf("decode span: %w", err)
+	}
+	switch {
+	case !hexID(s.TraceID, 32):
+		return s, fmt.Errorf("decode span: bad trace_id %q", s.TraceID)
+	case !hexID(s.SpanID, 16):
+		return s, fmt.Errorf("decode span: bad span_id %q", s.SpanID)
+	case s.Service == "":
+		return s, errors.New("decode span: empty service")
+	case s.Start.IsZero():
+		return s, errors.New("decode span: missing start")
+	}
+	return s, nil
+}
+
+// hexID reports whether id is n lowercase hex digits and not all zeros (W3C's invalid ID).
+func hexID(id string, n int) bool {
+	if len(id) != n {
+		return false
+	}
+	nonzero := false
+	for _, c := range id {
+		switch {
+		case c >= '1' && c <= '9', c >= 'a' && c <= 'f':
+			nonzero = true
+		case c == '0':
+		default:
+			return false
+		}
+	}
+	return nonzero
 }
 
 // Decode turns a record into a point, rejecting records that would make a meaningless row.
@@ -55,7 +99,7 @@ func backoff(attempt int) time.Duration {
 // Commit-after-write: a batch is marked done in Redpanda only once it is stored, so a crash at
 // any point re-reads it rather than losing it (at-least-once). A crash between the write and
 // the commit stores it again; the write path drops points that are already stored.
-func Run(ctx context.Context, cfg Config) {
+func Run[T any](ctx context.Context, cfg Loop[T]) {
 	for ctx.Err() == nil {
 		recs, err := cfg.Poll(ctx)
 		if ctx.Err() != nil {
@@ -69,21 +113,21 @@ func Run(ctx context.Context, cfg Config) {
 			continue
 		}
 
-		pts := make([]model.Point, 0, len(recs))
+		items := make([]T, 0, len(recs))
 		for _, r := range recs {
-			p, err := Decode(r)
+			it, err := cfg.Decode(r)
 			if err != nil {
 				// A poison record is skipped so one bad message can't stall the pipeline.
 				cfg.Logf("skip record at partition %d offset %d: %v", r.Partition, r.Offset, err)
 				continue
 			}
-			pts = append(pts, p)
+			items = append(items, it)
 		}
 		if len(recs) == 0 {
 			continue
 		}
 
-		if len(pts) > 0 && !write(ctx, cfg, pts) {
+		if len(items) > 0 && !write(ctx, cfg, items) {
 			return
 		}
 
@@ -97,9 +141,9 @@ func Run(ctx context.Context, cfg Config) {
 }
 
 // write retries one batch until it is stored. It returns false if ctx ended first.
-func write(ctx context.Context, cfg Config, pts []model.Point) bool {
+func write[T any](ctx context.Context, cfg Loop[T], items []T) bool {
 	for attempt := 1; ; attempt++ {
-		err := cfg.Write(ctx, pts)
+		err := cfg.Write(ctx, items)
 		if err == nil {
 			return true
 		}
@@ -107,7 +151,7 @@ func write(ctx context.Context, cfg Config, pts []model.Point) bool {
 			return false
 		}
 		d := backoff(attempt)
-		cfg.Logf("write %d points failed (attempt %d), retrying in %v: %v", len(pts), attempt, d, err)
+		cfg.Logf("write %d records failed (attempt %d), retrying in %v: %v", len(items), attempt, d, err)
 		if cfg.Wait(ctx, d) != nil {
 			return false
 		}
@@ -126,12 +170,13 @@ func Sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// NewConsumer builds a consumer-group client for topic. Auto-commit is off: Run commits each
-// batch itself, right after it is written (see CommitFrom).
-func NewConsumer(brokers []string, topic string) (*kgo.Client, error) {
+// NewConsumer builds a client in consumer group group for topic. Each topic has its own group,
+// so metrics and spans keep separate progress. Auto-commit is off: Run commits each batch
+// itself, right after it is written (see CommitFrom).
+func NewConsumer(brokers []string, topic, group string) (*kgo.Client, error) {
 	return kgo.NewClient(
 		kgo.SeedBrokers(brokers...),
-		kgo.ConsumerGroup("taproot-processor"),
+		kgo.ConsumerGroup(group),
 		kgo.ConsumeTopics(topic),
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()), // first run reads what's already there
 		kgo.DisableAutoCommit(),

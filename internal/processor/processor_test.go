@@ -94,6 +94,7 @@ func runH(t *testing.T, h *harness) *harness {
 
 func (h *harness) config() Config {
 	return Config{
+		Decode: Decode,
 		Poll: func(ctx context.Context) ([]*kgo.Record, error) {
 			if h.polled >= len(h.polls) {
 				h.cancel()
@@ -249,6 +250,7 @@ func TestCancelDuringRetryStops(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	writes, commits := 0, 0
 	cfg := Config{
+		Decode: Decode,
 		Poll: func(context.Context) ([]*kgo.Record, error) {
 			return []*kgo.Record{rec(t, pt(0), 0)}, nil
 		},
