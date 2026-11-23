@@ -35,7 +35,7 @@ func openSpanStore(t *testing.T) (*Store, context.Context) {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(func() {
-		for _, name := range []string{s.traceIndexView(), s.traceIndexTable(), s.spanTable()} {
+		for _, name := range []string{s.redView(), s.redTable(), s.traceIndexView(), s.traceIndexTable(), s.spanTable()} {
 			if err := s.conn.Exec(context.Background(), "DROP TABLE IF EXISTS "+name); err != nil {
 				t.Errorf("drop %s: %v", name, err)
 			}
@@ -343,5 +343,173 @@ func TestRecentTraces(t *testing.T) {
 			!got[i].Start.Equal(spans[want].Start) {
 			t.Errorf("trace %d = %+v, want %s at %v", i, got[i], traceIDs[want], spans[want].Start)
 		}
+	}
+}
+
+// redMinute is a whole minute recently enough for both retentions.
+var redMinute = time.Now().UTC().Truncate(time.Minute).Add(-10 * time.Minute)
+
+var redSeq int
+
+// req makes one span of service with this kind, status and duration, starting at.
+func req(service, op, kind, status string, at time.Time, dur time.Duration) model.Span {
+	redSeq++
+	return model.Span{TraceID: fmt.Sprintf("%032x", redSeq+0x1000), SpanID: fmt.Sprintf("%016x", redSeq+0x1000),
+		Service: service, Name: op, Kind: kind, Start: at, Duration: dur, Status: status}
+}
+
+func redOf(t *testing.T, s *Store, ctx context.Context) []REDMinute {
+	t.Helper()
+	got, err := s.RED(ctx, redMinute.Add(-time.Hour), redMinute.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("RED: %v", err)
+	}
+	return got
+}
+
+func near(t *testing.T, what string, got, want, tol time.Duration) {
+	t.Helper()
+	if d := got - want; d < -tol || d > tol {
+		t.Errorf("%s = %v, want %v ± %v", what, got, want, tol)
+	}
+}
+
+// RED 1. Only work a service was asked to do counts as a request: server and consumer spans.
+func TestREDCountsServerAndConsumer(t *testing.T) {
+	s, ctx := openSpanStore(t)
+	at := redMinute.Add(10 * time.Second)
+	var spans []model.Span
+	for _, kind := range []string{"server", "server", "consumer", "client", "internal", "producer"} {
+		spans = append(spans, req("checkout", "op", kind, "ok", at, time.Millisecond))
+	}
+	if err := s.InsertSpans(ctx, spans); err != nil {
+		t.Fatal(err)
+	}
+	got := redOf(t, s, ctx)
+	if len(got) != 1 || got[0].Service != "checkout" || !got[0].Minute.Equal(redMinute) || got[0].Requests != 3 {
+		t.Fatalf("RED = %+v, want one checkout minute at %v with 3 requests", got, redMinute)
+	}
+}
+
+// RED 2. Errors are spans with status error.
+func TestREDErrors(t *testing.T) {
+	s, ctx := openSpanStore(t)
+	var spans []model.Span
+	for i := 0; i < 10; i++ {
+		status := "ok"
+		if i < 3 {
+			status = "error"
+		}
+		spans = append(spans, req("payment", "Charge", "server", status, redMinute.Add(time.Duration(i)*time.Second), time.Millisecond))
+	}
+	if err := s.InsertSpans(ctx, spans); err != nil {
+		t.Fatal(err)
+	}
+	got := redOf(t, s, ctx)
+	if len(got) != 1 || got[0].Requests != 10 || got[0].Errors != 3 {
+		t.Fatalf("RED = %+v, want 10 requests, 3 errors", got)
+	}
+}
+
+// latencies returns server spans of 1..n ms (from lo), all in redMinute.
+func latencies(lo, hi int) []model.Span {
+	var spans []model.Span
+	for ms := lo; ms <= hi; ms++ {
+		spans = append(spans, req("checkout", "PlaceOrder", "server", "ok",
+			redMinute.Add(time.Duration(ms)*100*time.Millisecond), time.Duration(ms)*time.Millisecond))
+	}
+	return spans
+}
+
+func checkLatencies(t *testing.T, got []REDMinute) {
+	t.Helper()
+	if len(got) != 1 || got[0].Requests != 100 {
+		t.Fatalf("RED = %+v, want one minute with 100 requests", got)
+	}
+	m := got[0]
+	near(t, "avg", m.Avg, 50500*time.Microsecond, time.Microsecond)
+	near(t, "max", m.Max, 100*time.Millisecond, 0)
+	near(t, "p50", m.P50, 50*time.Millisecond, 2*time.Millisecond) // t-digest is approximate
+	near(t, "p95", m.P95, 95*time.Millisecond, 2*time.Millisecond)
+	near(t, "p99", m.P99, 99*time.Millisecond, 2*time.Millisecond)
+}
+
+// RED 3. Durations: average, worst, and percentiles.
+func TestREDDurations(t *testing.T) {
+	s, ctx := openSpanStore(t)
+	if err := s.InsertSpans(ctx, latencies(1, 100)); err != nil {
+		t.Fatal(err)
+	}
+	checkLatencies(t, redOf(t, s, ctx))
+}
+
+// RED 4. One minute that arrived in two batches (two rollup rows until merges) reads as one,
+// percentiles included: the sketches merge.
+func TestREDBatchesMerge(t *testing.T) {
+	s, ctx := openSpanStore(t)
+	if err := s.InsertSpans(ctx, latencies(1, 50)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.InsertSpans(ctx, latencies(51, 100)); err != nil {
+		t.Fatal(err)
+	}
+	checkLatencies(t, redOf(t, s, ctx))
+}
+
+// RED 5. A service's operations add up to one row per minute.
+func TestREDOperationsMerge(t *testing.T) {
+	s, ctx := openSpanStore(t)
+	spans := []model.Span{
+		req("cart", "GetCart", "server", "ok", redMinute, time.Millisecond),
+		req("cart", "AddItem", "server", "error", redMinute.Add(time.Second), 3*time.Millisecond),
+		req("cart", "AddItem", "server", "ok", redMinute.Add(2*time.Second), 5*time.Millisecond),
+	}
+	if err := s.InsertSpans(ctx, spans); err != nil {
+		t.Fatal(err)
+	}
+	got := redOf(t, s, ctx)
+	if len(got) != 1 || got[0].Requests != 3 || got[0].Errors != 1 || got[0].Max != 5*time.Millisecond {
+		t.Fatalf("RED = %+v, want one cart minute: 3 requests, 1 error, max 5ms", got)
+	}
+}
+
+// RED 6. A span belongs to the minute it started in, even if it ends in the next.
+func TestREDMinuteBoundaries(t *testing.T) {
+	s, ctx := openSpanStore(t)
+	spans := []model.Span{
+		req("quote", "getquote", "server", "ok", redMinute.Add(59*time.Second+999*time.Millisecond), 2*time.Second),
+		req("quote", "getquote", "server", "ok", redMinute.Add(time.Minute), time.Millisecond),
+	}
+	if err := s.InsertSpans(ctx, spans); err != nil {
+		t.Fatal(err)
+	}
+	got := redOf(t, s, ctx)
+	if len(got) != 2 || !got[0].Minute.Equal(redMinute) || got[0].Requests != 1 ||
+		!got[1].Minute.Equal(redMinute.Add(time.Minute)) || got[1].Requests != 1 {
+		t.Fatalf("RED = %+v, want 1 request in %v and 1 in the next minute", got, redMinute)
+	}
+}
+
+// RED 7. A replayed batch isn't counted twice: InsertNewSpans drops it before the view sees it.
+func TestREDReplayNotDoubled(t *testing.T) {
+	s, ctx := openSpanStore(t)
+	spans := latencies(1, 100)
+	for i := 0; i < 2; i++ {
+		if _, err := s.InsertNewSpans(ctx, spans); err != nil {
+			t.Fatal(err)
+		}
+	}
+	checkLatencies(t, redOf(t, s, ctx))
+}
+
+// RED 8. The rollup is kept 30 days.
+func TestREDSchema(t *testing.T) {
+	s, ctx := openSpanStore(t)
+	if err := s.EnsureSpanSchema(ctx); err != nil {
+		t.Fatalf("second EnsureSpanSchema: %v", err)
+	}
+	want := fmt.Sprintf("toIntervalDay(%d)", RollupRetentionDays)
+	if ddl := showCreate(t, s, ctx, s.redTable()); !strings.Contains(ddl, want) {
+		t.Errorf("%s has no %s TTL:\n%s", s.redTable(), want, ddl)
 	}
 }

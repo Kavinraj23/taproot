@@ -37,7 +37,7 @@ s=$(get "/api/datasources/uid/$DS_UID/health" | json "d.get('status')")
 [ "$s" = "OK" ] && pass "2 data source health" || fail "2 data source health" "status '${s:-missing}'"
 
 # 3-5 for each dashboard: "uid|title".
-for d in "taproot-host-cpu|Host CPU" "taproot-services|Services"; do
+for d in "taproot-host-cpu|Host CPU" "taproot-services|Services" "taproot-red|Service RED"; do
   uid=${d%%|*}; title=${d#*|}
 
   # 3. Dashboard provisioned into the Taproot folder.

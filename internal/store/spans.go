@@ -20,6 +20,8 @@ func (s *Store) spanTableName() string {
 func (s *Store) spanTable() string       { return s.name(s.spanTableName()) }
 func (s *Store) traceIndexTable() string { return s.name(s.spanTableName() + "_trace_index") }
 func (s *Store) traceIndexView() string  { return s.name(s.spanTableName() + "_trace_index_mv") }
+func (s *Store) redTable() string        { return s.name(s.spanTableName() + "_red_1m") }
+func (s *Store) redView() string         { return s.name(s.spanTableName() + "_red_1m_mv") }
 
 // EnsureSpanSchema creates the spans table, the trace index and the view that fills it, with
 // the same 48-hour retention as raw metrics. Safe to run on every start. (Design section 5,
@@ -74,7 +76,102 @@ GROUP BY trace_id`
 	if err := s.conn.Exec(ctx, view); err != nil {
 		return fmt.Errorf("create trace index view: %w", err)
 	}
+	return s.ensureRED(ctx)
+}
+
+// ensureRED creates the per-minute RED rollup (rate, errors, duration per service and
+// operation) and the view that fills it from every insert into spans, like metrics_1m
+// (docs/decisions/0006, 0008 task 5). Kept 30 days, so baselines can look back past the
+// 48 hours raw spans live.
+//
+// A request is a server or consumer span: work a service was asked to do, by a caller or a
+// queue. Client, internal and producer spans are its own steps and outgoing calls.
+//
+// Percentiles can't be added up like counts, so each row keeps a t-digest sketch of its
+// durations, and sketches merge. A minute arriving in several batches is several rows until
+// background merges, so every query must aggregate:
+//
+//	SELECT service, minute, sum(requests), sum(errors),
+//	       quantilesTDigestMerge(0.5, 0.95, 0.99)(duration_q)
+//	FROM spans_red_1m GROUP BY service, minute
+//
+// The view sees each inserted batch as is, so it relies on InsertNewSpans dropping repeats
+// before insert: a replayed span would otherwise be counted twice.
+func (s *Store) ensureRED(ctx context.Context) error {
+	table := `CREATE TABLE IF NOT EXISTS ` + s.redTable() + ` (
+    service         LowCardinality(String),
+    operation       LowCardinality(String),
+    minute          DateTime('UTC'),
+    requests        SimpleAggregateFunction(sum, UInt64),
+    errors          SimpleAggregateFunction(sum, UInt64),
+    duration_sum_ns SimpleAggregateFunction(sum, UInt64),
+    duration_max_ns SimpleAggregateFunction(max, UInt64),
+    duration_q      AggregateFunction(quantilesTDigest(0.5, 0.95, 0.99), UInt64)
+) ENGINE = AggregatingMergeTree
+PARTITION BY toDate(minute)
+ORDER BY (service, operation, minute)
+` + fmt.Sprintf("TTL minute + INTERVAL %d DAY", RollupRetentionDays)
+	if err := s.conn.Exec(ctx, table); err != nil {
+		return fmt.Errorf("create RED rollup: %w", err)
+	}
+	view := `CREATE MATERIALIZED VIEW IF NOT EXISTS ` + s.redView() + ` TO ` + s.redTable() + ` AS
+SELECT service, name AS operation, toStartOfMinute(start) AS minute,
+       count() AS requests, countIf(status = 'error') AS errors,
+       sum(duration_ns) AS duration_sum_ns, max(duration_ns) AS duration_max_ns,
+       quantilesTDigestState(0.5, 0.95, 0.99)(duration_ns) AS duration_q
+FROM ` + s.spanTable() + `
+WHERE kind IN ('server', 'consumer')
+GROUP BY service, operation, minute`
+	if err := s.conn.Exec(ctx, view); err != nil {
+		return fmt.Errorf("create RED view: %w", err)
+	}
 	return nil
+}
+
+// REDMinute is one service's requests in one minute: how many, how many failed, how long
+// they took. P50/P95/P99 are approximate (t-digest).
+type REDMinute struct {
+	Service                 string
+	Minute                  time.Time
+	Requests, Errors        uint64
+	Avg, Max, P50, P95, P99 time.Duration
+}
+
+// RED returns each service's RED numbers per minute for minutes in [from, to), by service
+// then minute. A service's operations are merged.
+func (s *Store) RED(ctx context.Context, from, to time.Time) ([]REDMinute, error) {
+	rows, err := s.conn.Query(ctx, `SELECT service, minute, sum(requests) AS n, sum(errors),
+       sum(duration_sum_ns), max(duration_max_ns),
+       arrayMap(x -> toFloat64(x), quantilesTDigestMerge(0.5, 0.95, 0.99)(duration_q))
+FROM `+s.redTable()+`
+WHERE minute >= ? AND minute < ?
+GROUP BY service, minute
+ORDER BY service, minute`, from.UTC(), to.UTC())
+	if err != nil {
+		return nil, fmt.Errorf("read RED: %w", err)
+	}
+	defer rows.Close()
+	var out []REDMinute
+	for rows.Next() {
+		var m REDMinute
+		var sum, max uint64
+		var q []float64
+		if err := rows.Scan(&m.Service, &m.Minute, &m.Requests, &m.Errors, &sum, &max, &q); err != nil {
+			return nil, fmt.Errorf("scan RED: %w", err)
+		}
+		if m.Requests > 0 {
+			m.Avg = time.Duration(sum / m.Requests)
+		}
+		m.Max = time.Duration(max)
+		if len(q) == 3 {
+			m.P50, m.P95, m.P99 = time.Duration(q[0]), time.Duration(q[1]), time.Duration(q[2])
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read RED: %w", err)
+	}
+	return out, nil
 }
 
 // InsertSpans writes spans as one batch.
