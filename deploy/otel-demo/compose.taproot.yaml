@@ -19,3 +19,46 @@ services:
       resources:
         limits:
           memory: 64M
+
+  # Taproot's own hand-instrumented Kafka workers (M4 task 6, worker/README.md): order-auditor
+  # reads checkout's orders and sends summaries to orders.audited; order-ledger reads those.
+  # Spans go to the demo's collector like every demo service's. The build path is set by
+  # scripts/up.sh relative to the demo dir, where layered compose files resolve paths from.
+  order-auditor:
+    build: ${TAPROOT_WORKER_DIR:?run via scripts/up.sh}
+    image: taproot-order-worker
+    pull_policy: build
+    container_name: order-auditor
+    environment:
+      - ROLE=auditor
+      - OTEL_SERVICE_NAME=order-auditor
+      - KAFKA_ADDR=kafka:9092
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+    deploy:
+      resources:
+        limits:
+          memory: 96M
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+  order-ledger:
+    build: ${TAPROOT_WORKER_DIR:?run via scripts/up.sh}
+    image: taproot-order-worker
+    pull_policy: build
+    container_name: order-ledger
+    environment:
+      - ROLE=ledger
+      - OTEL_SERVICE_NAME=order-ledger
+      - KAFKA_ADDR=kafka:9092
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+    deploy:
+      resources:
+        limits:
+          memory: 96M
+    restart: unless-stopped
+    depends_on:
+      order-auditor:
+        condition: service_started

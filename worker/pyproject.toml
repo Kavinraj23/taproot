@@ -2,10 +2,22 @@
 name = "taproot-worker"
 version = "0.0.0"
 requires-python = ">=3.12"
-dependencies = []
+# Pinned: the image and CI install exactly these (worker/README.md).
+dependencies = [
+    "confluent-kafka==2.6.1",
+    "opentelemetry-api==1.28.2",
+    "opentelemetry-sdk==1.28.2",
+    "opentelemetry-exporter-otlp-proto-http==1.28.2",
+    # At least the version orders_pb2.py was generated for (its "Protobuf Python Version").
+    "protobuf==5.28.3",
+]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+# Tests, and regenerating orders_pb2.py; not in the image.
+dev = ["pytest==8.3.3", "grpcio-tools==1.68.0"]
+
+[tool.setuptools]
+packages = ["taproot_worker"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

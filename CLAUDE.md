@@ -11,7 +11,7 @@
 
 Do not write these. Give hints instead (approach, pitfalls, pointers to the design doc), and let the user write the code. See the ownership table in `docs/design.md`.
 
-1. Context propagation in the Python Kafka worker (learning target 1: trace propagation)
+1. Context propagation in the Python Kafka worker (learning target 1: trace propagation). Waived for M4 task 6 at the user's request (2026-11-23): Claude writes it and explains it back, with understanding checks.
 2. Dedup keys and commit-after-write in the backend processor (learning target 2: reliable data movement). Waived for M3 and for M4 span dedup at the user's request: Claude wrote them and explains them back (docs/decisions/0007, 0008).
 3. Root-cause graph walk, shared dependency + timing order (learning target 3: graph-based root cause)
 

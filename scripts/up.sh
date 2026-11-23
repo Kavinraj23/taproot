@@ -21,6 +21,8 @@ echo "Starting OpenTelemetry demo..."
 # sends spans to the agent (docs/decisions/0008). Relative to the demo dir, so the path works the
 # same from Git Bash and Linux.
 EXTRAS="$(realpath --relative-to="$DEMO_DIR" "$ROOT/deploy/otel-demo/otelcol-config-extras.yml")"
+# The order workers (M4 task 6) are built from worker/, named the same way.
+export TAPROOT_WORKER_DIR="$(realpath --relative-to="$DEMO_DIR" "$ROOT/worker")"
 (
   cd "$DEMO_DIR"
   DEMO_VERSION=3.1.0 OTEL_COLLECTOR_CONFIG_EXTRAS="./$EXTRAS" docker compose --env-file .env --env-file .env.override \

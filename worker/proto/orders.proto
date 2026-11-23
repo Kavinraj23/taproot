@@ -1,0 +1,29 @@
+// Taproot's own copy of the few demo messages the order workers read: checkout publishes an
+// OrderResult to the demo's Kafka topic "orders" (otel-demo pb/demo.proto, demo 3.1.0).
+// Field numbers match the demo's; fields left out here are skipped when decoding.
+// Regenerate taproot_worker/orders_pb2.py after a change: see README.md.
+syntax = "proto3";
+
+package oteldemo;
+
+message Money {
+  string currency_code = 1;
+  int64 units = 2;
+  int32 nanos = 3;
+}
+
+message CartItem {
+  string product_id = 1;
+  int32 quantity = 2;
+}
+
+message OrderItem {
+  CartItem item = 1;
+  Money cost = 2;
+}
+
+message OrderResult {
+  string order_id = 1;
+  Money shipping_cost = 3;
+  repeated OrderItem items = 5;
+}
