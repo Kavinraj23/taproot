@@ -71,8 +71,10 @@ services:
     pid: host
     user: "0"
     cap_add: [SYS_PTRACE]
-    # agent-buffer is the disk buffer (internal/spool): points wait there while Redpanda is
-    # down, and survive an agent restart. Capped at TAPROOT_BUFFER_MAX_MB (256 MB, ~9 hours).
+    # agent-buffer is the disk buffer (internal/spool): points and spans wait there while
+    # Redpanda is down, and survive an agent restart. Points are capped at TAPROOT_BUFFER_MAX_MB
+    # (256 MB, ~9 hours); spans, in their own folder, at TAPROOT_SPAN_BUFFER_MAX_MB (1 GB, ~2
+    # hours at ~112 spans/s x 1.35 KB, measured 2026-11-23).
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - agent-buffer:/var/lib/taproot/buffer

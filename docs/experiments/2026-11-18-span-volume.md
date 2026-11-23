@@ -40,7 +40,7 @@ Measured from ClickHouse (`count()` per service over a full 10-minute window, ev
 | **total** | **112.3** |
 
 - **Size:** 1,354 bytes per span record on `taproot.spans` (average of 1,200), not the ~600 estimated above. So **~148 KB/s**.
-- **Agent span spool (256 MB): about 29 minutes** of a Redpanda outage, not 12 hours. Task 7's 60-second outages are well inside it, but a long one would hit the spool's full-buffer behaviour (decision 0007 defers its priorities).
-- **ClickHouse:** 109 MiB compressed for 756k spans. 48 hours at this rate is ~19M spans, **~2.8 GB compressed**. That's heavy for a laptop disk next to everything else, and a reason to reconsider span retention or sampling (design section 5 keeps raw spans "about two days"). That's for the user to decide, not changed here.
+- **Agent span spool (256 MB): about 29 minutes** of a Redpanda outage, not 12 hours. Task 7's 60-second outages are well inside it, but a long one would hit the spool's full-buffer behaviour (decision 0007 defers its priorities). **Raised to 1 GB (~2 hours) the same day** (decision 0008, span buffer size).
+- **ClickHouse:** 109 MiB compressed for 756k spans. 48 hours at this rate is ~19M spans, **~2.8 GB compressed**. The Docker disk has 938 GB free, so 48 h retention stays.
 - **Pipeline at this rate:** processor span lag 0, processor 28 MiB of 128 at ~10% CPU, agent 25 MiB of 64.
 - Why it differs from 11-18: a `frontend-web` service (browser-side spans) now reports, and frontend/frontend-proxy are several times busier. The cause isn't investigated. The load generator settings are unchanged.

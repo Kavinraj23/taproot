@@ -65,6 +65,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("disk buffer: %v", err)
 	}
+	log.Printf("disk buffer: cap %d MB", maxMB)
 	if n := buf.Pending(); n > 0 {
 		log.Printf("disk buffer: %d points from before the restart still to send", n)
 	}
@@ -82,7 +83,9 @@ func main() {
 		log.Fatalf("redpanda client (spans): %v", err)
 	}
 	spanDir := envOr("TAPROOT_SPAN_BUFFER_DIR", "/var/lib/taproot/buffer/spans")
-	spanMaxMB, err := strconv.Atoi(envOr("TAPROOT_SPAN_BUFFER_MAX_MB", "256"))
+	// 1 GB: spans arrive ~112/s at ~1.35 KB, so this holds about 2 hours of a Redpanda outage
+	// (docs/decisions/0008, span buffer size).
+	spanMaxMB, err := strconv.Atoi(envOr("TAPROOT_SPAN_BUFFER_MAX_MB", "1024"))
 	if err != nil || spanMaxMB <= 0 {
 		log.Fatalf("TAPROOT_SPAN_BUFFER_MAX_MB: want a positive number of megabytes, got %q", os.Getenv("TAPROOT_SPAN_BUFFER_MAX_MB"))
 	}
@@ -90,6 +93,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("span disk buffer: %v", err)
 	}
+	log.Printf("span disk buffer: cap %d MB", spanMaxMB)
 	if n := spanBuf.Pending(); n > 0 {
 		log.Printf("span disk buffer: %d spans from before the restart still to send", n)
 	}

@@ -110,6 +110,12 @@
   The replay was 300 spans, all skipped as already stored (twice: once alone, once in `--all`). These were the only skips. The agent restarts caused no resends, because the agent answers only after its disk append, so a cut-off request is retried whole.
 - **Limits and findings:**
   - **Losses before the collector aren't seen.** A demo service that dies before exporting (checkout's startup panics, task 4) loses spans Taproot never received. S0 covers the collector → agent step onward.
-  - **Span volume is 10× the 11-18 estimate** (112/s, 1,354 bytes each; `docs/experiments/2026-11-18-span-volume.md`, 2026-11-23 section). The agent's 256 MB span spool covers ~29 minutes of a Redpanda outage, not 12 h. 48 h of spans would be ~2.8 GB compressed. **Open for the user:** whether to shorten span retention, sample, or keep it as designed. That's a design.md change, so not made here.
+  - **Span volume is 10× the 11-18 estimate** (112/s, 1,354 bytes each; `docs/experiments/2026-11-18-span-volume.md`, 2026-11-23 section). The agent's 256 MB span spool covered only ~29 minutes of a Redpanda outage. Resolved below (span buffer size).
   - **The trace index** helps normal traces (7–11× fewer rows) but isn't faster yet at 750k rows, and long streaming spans defeat it (`docs/experiments/2026-11-23-trace-index.md`).
   - **Still owed:** the end-of-M4 explain-back (M3 commit-after-write and dedup, M4 span dedup, trace propagation) with understanding checks, and the user's break-it test.
+
+## Span buffer size (2026-11-23)
+
+- **Decision:** the agent's span spool cap (`TAPROOT_SPAN_BUFFER_MAX_MB`) goes from 256 MB to **1 GB**, about 2 hours of a Redpanda outage at ~112 spans/s × 1.35 KB. The metrics spool stays at 256 MB (~9 h). Raw spans are still kept 48 h. The agent logs both caps at start.
+- **Why:** the user chose this over shorter span retention (24 h) or sampling noisy spans at the collector. It keeps every span and the design as written. The earlier worry about 48 h of spans (~2.8 GB compressed) is withdrawn: the Docker disk has 938 GB free. The spool reads one record at a time from 4 MiB segments, so a bigger cap costs disk, not agent memory.
+- **Replaces:** the 256 MB span spool cap from Task 2 ("same 256 MB cap").
