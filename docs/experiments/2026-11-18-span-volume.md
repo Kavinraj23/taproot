@@ -23,3 +23,24 @@ Steady state is **about 5–11 spans/s**. The largest single export held 102 spa
 - **ClickHouse:** 48 hours is about 1–2 million spans, likely 100–200 MB compressed. That fits easily.
 - **Agent memory (64 MiB limit, 23 MiB used):** an OTLP request of about 100 spans is a few tens of KB, so there's no reason to raise the limit now. Check it again in task 2 under the Kafka overload flag.
 - **Caveat:** this is the default light load. Re-measure in task 2 from the agent's own counters over a longer steady period, and with `kafkaQueueProblems` on.
+
+## 2026-11-23: re-measured, 10× more (M4 task 7)
+
+Measured from ClickHouse (`count()` per service over a full 10-minute window, every span stored exactly once per task 7's checks), on `m4-traces` after task 6, default load (`LOCUST_USERS=5`).
+
+| Service | spans/s |
+|---|---|
+| frontend-proxy | 32.7 |
+| frontend | 27.0 |
+| flagd | 13.5 |
+| frontend-web (browser spans, new since 11-18) | 12.8 |
+| product-catalog | 10.1 |
+| image-provider | 4.7 |
+| all others | ~11 |
+| **total** | **112.3** |
+
+- **Size:** 1,354 bytes per span record on `taproot.spans` (average of 1,200), not the ~600 estimated above. So **~148 KB/s**.
+- **Agent span spool (256 MB): about 29 minutes** of a Redpanda outage, not 12 hours. Task 7's 60-second outages are well inside it, but a long one would hit the spool's full-buffer behaviour (decision 0007 defers its priorities).
+- **ClickHouse:** 109 MiB compressed for 756k spans. 48 hours at this rate is ~19M spans, **~2.8 GB compressed**. That's heavy for a laptop disk next to everything else, and a reason to reconsider span retention or sampling (design section 5 keeps raw spans "about two days"). That's for the user to decide, not changed here.
+- **Pipeline at this rate:** processor span lag 0, processor 28 MiB of 128 at ~10% CPU, agent 25 MiB of 64.
+- Why it differs from 11-18: a `frontend-web` service (browser-side spans) now reports, and frontend/frontend-proxy are several times busier. The cause isn't investigated. The load generator settings are unchanged.

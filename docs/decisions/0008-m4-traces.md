@@ -49,8 +49,8 @@
   - **Grafana's trace view is deferred to M5**, together with the Grafana 11.6+ upgrade the node graph also needs (decision 0003).
 - **Checked on 2026-11-23:** a healthy order trace (73 spans, 12 services, 166 ms) shows load-generator → frontend → checkout → shipping → quote, payment, email → `publish orders` with no orphans. Printed span counts equal `count()` in ClickHouse. A fraud-detection trace starts at its own `receive orders` consumer span (Task 3 Limits). Bad ID → exit 2, unknown ID → exit 1, uppercase ID → found.
 - **Limits:**
-  - **The index doesn't pay off yet at this size.** With 15,370 spans stored (just after a restart), the lookup read 2,827 index rows + 14,881 span rows, while a plain `WHERE trace_id = …` scan read 14,972. The table is only about two 8,192-row blocks per part, and a time filter can only skip whole blocks. The saving should show when the table holds many blocks (48 h of spans). Re-measure then (task 7) before claiming it.
-  - **Startup orphans.** In the first two minutes after `up.sh`, three checkout traces lacked checkout's `PlaceOrder` server span, so its children printed as orphans. In those traces frontend's checkout call timed out at 10.5 s. The collector also couldn't resolve `taproot-agent` until `up.sh` connected the alias (37 retried exports). Every trace after that was whole. Whether the span was dropped upstream or never ended is for task 7's end-to-end span count.
+  - **The index doesn't pay off yet at this size.** With 15,370 spans stored (just after a restart), the lookup read 2,827 index rows + 14,881 span rows, while a plain `WHERE trace_id = …` scan read 14,972. The table is only about two 8,192-row blocks per part, and a time filter can only skip whole blocks. The saving should show when the table holds many blocks (48 h of spans). Re-measure then (task 7) before claiming it. **Task 7:** at 749k spans, normal traces read 7–11× fewer rows through the index, but it's not yet faster in wall time, and traces stretched by long streaming spans defeat it (`docs/experiments/2026-11-23-trace-index.md`).
+  - **Startup orphans.** In the first two minutes after `up.sh`, three checkout traces lacked checkout's `PlaceOrder` server span, so its children printed as orphans. In those traces frontend's checkout call timed out at 10.5 s. The collector also couldn't resolve `taproot-agent` until `up.sh` connected the alias (37 retried exports). Every trace after that was whole. Whether the span was dropped upstream or never ended is for task 7's end-to-end span count. **Task 7:** checkout panicked (nil pointer) and restarted 5 times while the demo started, and the spans it hadn't exported died with the process. That's a loss inside a demo service, before Taproot.
 
 ## Task 5: RED metrics per service (2026-11-23)
 
@@ -88,3 +88,28 @@
   - Taproot's Kafka sensor found both consumer groups by itself (lag 0).
   - Worker memory: 32 and 29 MiB of 96. Metrics `check-loss` 0/0.
 - **Limits:** none of the workers' messages are deduplicated, and the ledger's totals reset on restart. Both are fine for a service whose job is to be traced, not to keep books.
+
+## Task 7 and closing M4 (2026-11-23)
+
+- **Decision:**
+  - **The loss check covers spans.** `cmd/losscheck` compares, over the same window, the distinct spans in `taproot.spans` (Redpanda) that *started* in the window with the stored ones, by `model.Span.Key` (S1 missing, S2 duplicates), next to the metric checks (L1–L3). `losscheck.CompareKeys` is the exact comparison both use. A negative control against a scratch copy of the table, with 9 spans removed and 1 doubled, made S1 and S2 fail as they should.
+  - **The step before Taproot is checked too (S0).** The demo collector's own metrics are served on the demo network (Taproot's extras file, which repeats the demo's periodic reader, since lists are replaced). `check-loss.sh` reads `otelcol_exporter_send_failed_spans` + `enqueue_failed_spans` for `otlp_http/taproot` before and after each scenario: they must not move, and the queue must drain. Checked first: with the agent stopped 27 s, the queue grew to 284 batches while `send_failed` stayed absent (it counts only after retries run out). Then it drained to 0 with ~6,800 more spans sent.
+  - **A deliberate double delivery (`span-replay`).** The newest 100 spans of each partition are produced again unchanged. The processor must log skipping all of them, and S2 must stay 0.
+- **M4's proof** (design section 8): "look up one trace ID and see its full path, including a hop through my worker across Kafka". Done in task 6: `go run ./cmd/trace <id>` shows frontend → checkout → `publish orders` → order-auditor → `publish orders.audited` → order-ledger in one trace.
+- **Checked on 2026-11-23**, `bash scripts/check-loss.sh --all`, 60 s outages, every check PASS:
+
+  | Scenario | points (Redpanda = ClickHouse) | spans (Redpanda = ClickHouse) | collector sent, gave up |
+  |---|---|---|---|
+  | processor killed | 5,412 | 14,997 | 11,707, 0 |
+  | ClickHouse stopped, processor killed mid-retry | 6,027 | 16,211 | 13,489, 0 |
+  | Redpanda stopped | 5,658 | 15,553 | 12,827, 0 |
+  | Redpanda stopped + agent restarted | 5,682 | 17,045 | 14,919, 0 |
+  | agent restarted | 3,632 | 9,480 | 6,717, 0 |
+  | span replay | 2,871 | 7,562 | 4,471, 0 |
+
+  The replay was 300 spans, all skipped as already stored (twice: once alone, once in `--all`). These were the only skips. The agent restarts caused no resends, because the agent answers only after its disk append, so a cut-off request is retried whole.
+- **Limits and findings:**
+  - **Losses before the collector aren't seen.** A demo service that dies before exporting (checkout's startup panics, task 4) loses spans Taproot never received. S0 covers the collector → agent step onward.
+  - **Span volume is 10× the 11-18 estimate** (112/s, 1,354 bytes each; `docs/experiments/2026-11-18-span-volume.md`, 2026-11-23 section). The agent's 256 MB span spool covers ~29 minutes of a Redpanda outage, not 12 h. 48 h of spans would be ~2.8 GB compressed. **Open for the user:** whether to shorten span retention, sample, or keep it as designed. That's a design.md change, so not made here.
+  - **The trace index** helps normal traces (7–11× fewer rows) but isn't faster yet at 750k rows, and long streaming spans defeat it (`docs/experiments/2026-11-23-trace-index.md`).
+  - **Still owed:** the end-of-M4 explain-back (M3 commit-after-write and dedup, M4 span dedup, trace propagation) with understanding checks, and the user's break-it test.

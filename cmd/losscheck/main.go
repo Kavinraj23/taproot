@@ -1,5 +1,6 @@
 // Command losscheck reports whether every point in Redpanda reached ClickHouse exactly once
-// over a recent window, and whether any every-tick series went silent. Exit 0 means all clear.
+// over a recent window, and whether any every-tick series went silent; and the same "exactly
+// once" for spans that started in the window (M4). Exit 0 means all clear.
 //
 //	go run ./cmd/losscheck -window 10m
 package main
@@ -31,6 +32,8 @@ func main() {
 	topic := flag.String("topic", "taproot.metrics", "topic the agent produces to")
 	chAddr := flag.String("clickhouse", "localhost:9000", "ClickHouse native address")
 	table := flag.String("table", "taproot.metrics", "raw metrics table")
+	spanTopic := flag.String("span-topic", "taproot.spans", "topic the agent produces spans to; empty skips the span check")
+	spanTable := flag.String("span-table", "taproot.spans", "spans table")
 	after := flag.String("after", "", "start no earlier than this RFC 3339 time (e.g. a minute after the agent started, to skip its startup)")
 	flag.Parse()
 	var notBefore time.Time
@@ -84,19 +87,64 @@ func main() {
 	r := losscheck.Report{From: from, To: to, Sent: distinct(sent), Stored: len(stored)}
 	r.Missing, r.Duplicates, r.MissingSample = losscheck.Compare(sent, stored)
 	r.Gaps = losscheck.Gaps(heartbeats(stored), *gap)
-	print(r, *gap)
+
+	checkSpans := *spanTopic != ""
+	if checkSpans {
+		sentSpans, err := readSpanTopic(ctx, strings.Split(*brokers, ","), *spanTopic, from, to)
+		if err != nil {
+			log.Fatalf("redpanda (spans): %v", err)
+		}
+		storedSpans, err := readSpanTable(ctx, ch, *spanTable, from, to)
+		if err != nil {
+			log.Fatalf("clickhouse (spans): %v", err)
+		}
+		r.SpansSent, r.SpansStored = distinctKeys(sentSpans), len(storedSpans)
+		r.SpansMissing, r.SpanDuplicates, r.SpanMissingSample = losscheck.CompareKeys(sentSpans, storedSpans)
+	}
+	print(r, *gap, checkSpans)
 	if !r.OK() {
 		os.Exit(1)
 	}
 }
 
-// readTopic returns the points in topic whose timestamps fall in [from, to]. It starts a
-// minute before from by record time (records are produced just after their points are
-// measured) and reads every partition up to its end offset as of now.
+// readTopic returns the points in topic whose timestamps fall in [from, to].
 func readTopic(ctx context.Context, brokers []string, topic string, from, to time.Time) ([]model.Point, error) {
+	var pts []model.Point
+	err := eachRecord(ctx, brokers, topic, from, func(rec *kgo.Record) {
+		p, err := processor.Decode(rec)
+		if err != nil {
+			return // the processor skips these too
+		}
+		if !p.Timestamp.Before(from) && !p.Timestamp.After(to) {
+			pts = append(pts, p)
+		}
+	})
+	return pts, err
+}
+
+// readSpanTopic returns the keys of the spans in topic that started in [from, to]. A span is
+// produced after it ends, so its record time is never before its start.
+func readSpanTopic(ctx context.Context, brokers []string, topic string, from, to time.Time) ([]string, error) {
+	var keys []string
+	err := eachRecord(ctx, brokers, topic, from, func(rec *kgo.Record) {
+		sp, err := processor.DecodeSpan(rec)
+		if err != nil {
+			return // the processor skips these too
+		}
+		if !sp.Start.Before(from) && !sp.Start.After(to) {
+			keys = append(keys, sp.Key())
+		}
+	})
+	return keys, err
+}
+
+// eachRecord calls fn for every record in topic from a minute before from by record time
+// (records are produced just after what they carry happened) up to each partition's end
+// offset as of now.
+func eachRecord(ctx context.Context, brokers []string, topic string, from time.Time, fn func(*kgo.Record)) error {
 	admCl, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer admCl.Close()
 	adm := kadm.NewClient(admCl)
@@ -106,14 +154,14 @@ func readTopic(ctx context.Context, brokers []string, topic string, from, to tim
 		err = starts.Error()
 	}
 	if err != nil {
-		return nil, fmt.Errorf("start offsets: %w", err)
+		return fmt.Errorf("start offsets: %w", err)
 	}
 	ends, err := adm.ListEndOffsets(ctx, topic)
 	if err == nil {
 		err = ends.Error()
 	}
 	if err != nil {
-		return nil, fmt.Errorf("end offsets: %w", err)
+		return fmt.Errorf("end offsets: %w", err)
 	}
 
 	begin := map[int32]kgo.Offset{}
@@ -126,24 +174,23 @@ func readTopic(ctx context.Context, brokers []string, topic string, from, to tim
 		}
 	})
 	if len(begin) == 0 {
-		return nil, nil
+		return nil
 	}
 
 	cl, err := kgo.NewClient(kgo.SeedBrokers(brokers...),
 		kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{topic: begin}))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer cl.Close()
 
-	var pts []model.Point
 	for len(stop) > 0 {
 		fetches := cl.PollFetches(ctx)
 		if err := ctx.Err(); err != nil {
-			return nil, fmt.Errorf("reading %d partitions: %w", len(stop), err)
+			return fmt.Errorf("reading %d partitions: %w", len(stop), err)
 		}
 		if errs := fetches.Errors(); len(errs) > 0 {
-			return nil, fmt.Errorf("fetch %s/%d: %w", errs[0].Topic, errs[0].Partition, errs[0].Err)
+			return fmt.Errorf("fetch %s/%d: %w", errs[0].Topic, errs[0].Partition, errs[0].Err)
 		}
 		fetches.EachRecord(func(rec *kgo.Record) {
 			end, ok := stop[rec.Partition]
@@ -153,16 +200,38 @@ func readTopic(ctx context.Context, brokers []string, topic string, from, to tim
 			if rec.Offset == end-1 {
 				delete(stop, rec.Partition)
 			}
-			p, err := processor.Decode(rec)
-			if err != nil {
-				return // the processor skips these too
-			}
-			if !p.Timestamp.Before(from) && !p.Timestamp.After(to) {
-				pts = append(pts, p)
-			}
+			fn(rec)
 		})
 	}
-	return pts, nil
+	return nil
+}
+
+// readSpanTable returns each stored span that started in [from, to] with its number of copies.
+func readSpanTable(ctx context.Context, ch driver.Conn, table string, from, to time.Time) (map[string]uint64, error) {
+	rows, err := ch.Query(ctx, `SELECT trace_id, span_id, count() FROM `+table+
+		` WHERE start BETWEEN ? AND ? GROUP BY trace_id, span_id`, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]uint64{}
+	for rows.Next() {
+		var sp model.Span
+		var n uint64
+		if err := rows.Scan(&sp.TraceID, &sp.SpanID, &n); err != nil {
+			return nil, err
+		}
+		out[sp.Key()] = n
+	}
+	return out, rows.Err()
+}
+
+func distinctKeys(keys []string) int {
+	seen := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		seen[k] = true
+	}
+	return len(seen)
 }
 
 // readTable returns one row per distinct point in [from, to], with its number of copies.
@@ -207,7 +276,7 @@ func distinct(pts []model.Point) int {
 	return len(seen)
 }
 
-func print(r losscheck.Report, gap time.Duration) {
+func print(r losscheck.Report, gap time.Duration, spans bool) {
 	verdict := func(ok bool) string {
 		if ok {
 			return "PASS"
@@ -225,4 +294,13 @@ func print(r losscheck.Report, gap time.Duration) {
 	for _, g := range r.Gaps {
 		fmt.Printf("        %s\n", g)
 	}
+	if !spans {
+		return
+	}
+	fmt.Printf("spans   %d in Redpanda, %d in ClickHouse (by start time)\n", r.SpansSent, r.SpansStored)
+	fmt.Printf("%s  S1 spans missing: %d in Redpanda but not ClickHouse\n", verdict(r.SpansMissing == 0), r.SpansMissing)
+	for _, s := range r.SpanMissingSample {
+		fmt.Printf("        e.g. %s\n", s)
+	}
+	fmt.Printf("%s  S2 span duplicates: %d extra copies in ClickHouse\n", verdict(r.SpanDuplicates == 0), r.SpanDuplicates)
 }

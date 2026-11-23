@@ -188,3 +188,48 @@ func TestCompareLabelValueLooksLikeTwoLabels(t *testing.T) {
 		t.Fatalf("missing %d, want 1: the two label sets were treated as the same series", missing)
 	}
 }
+
+// Spans (M4 task 7) are compared by key: trace ID / span ID.
+
+// 14. A sent key not stored is missing and named; extra stored copies are duplicates.
+func TestCompareKeys(t *testing.T) {
+	sent := []string{"t1/s1", "t1/s2", "t2/s1"}
+	stored := map[string]uint64{"t1/s1": 1, "t2/s1": 3}
+	missing, dups, sample := CompareKeys(sent, stored)
+	if missing != 1 || dups != 2 || !reflect.DeepEqual(sample, []string{"t1/s2"}) {
+		t.Errorf("CompareKeys = %d, %d, %v; want 1, 2, [t1/s2]", missing, dups, sample)
+	}
+}
+
+// 15. A span sent twice (a resend) counts once, and stored spans nobody sent in the window
+// are ignored.
+func TestCompareKeysResentAndStoredOnly(t *testing.T) {
+	sent := []string{"t1/s1", "t1/s1"}
+	stored := map[string]uint64{"t1/s1": 1, "t9/s9": 1}
+	if missing, dups, _ := CompareKeys(sent, stored); missing != 0 || dups != 0 {
+		t.Errorf("CompareKeys = %d missing, %d dups; want 0, 0", missing, dups)
+	}
+}
+
+// 16. The sample stays short and sorted however much is missing.
+func TestCompareKeysSampleCapped(t *testing.T) {
+	sent := []string{"t9/s", "t8/s", "t7/s", "t6/s", "t5/s", "t4/s", "t3/s"}
+	missing, _, sample := CompareKeys(sent, nil)
+	if missing != 7 || len(sample) != maxSample || !strings.HasPrefix(sample[0], "t") ||
+		sample[0] > sample[len(sample)-1] {
+		t.Errorf("missing %d, sample %v; want 7 and %d sorted", missing, sample, maxSample)
+	}
+}
+
+// 17. A span problem alone fails the report.
+func TestReportOKSpans(t *testing.T) {
+	if !(Report{}).OK() {
+		t.Fatal("empty report not OK")
+	}
+	if (Report{SpansMissing: 1}).OK() {
+		t.Error("report with a missing span is OK")
+	}
+	if (Report{SpanDuplicates: 1}).OK() {
+		t.Error("report with a duplicate span is OK")
+	}
+}

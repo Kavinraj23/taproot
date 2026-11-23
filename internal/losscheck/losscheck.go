@@ -52,10 +52,17 @@ type Report struct {
 	Duplicates    int // extra copies beyond the first
 	MissingSample []string
 	Gaps          []Gap
+
+	// Spans (M4), compared by model.Span.Key over spans that started in the window.
+	SpansSent, SpansStored, SpansMissing, SpanDuplicates int
+	SpanMissingSample                                    []string
 }
 
 // OK is true when nothing was lost, nothing was stored twice, and no heartbeat went silent.
-func (r Report) OK() bool { return r.Missing == 0 && r.Duplicates == 0 && len(r.Gaps) == 0 }
+func (r Report) OK() bool {
+	return r.Missing == 0 && r.Duplicates == 0 && len(r.Gaps) == 0 &&
+		r.SpansMissing == 0 && r.SpanDuplicates == 0
+}
 
 // Series names a series: metric plus labels sorted by name, values quoted, e.g.
 // cpu{host="a",zone="b"}. Quoting keeps a value like "1,b=2" from reading as two labels.
@@ -87,21 +94,32 @@ func ID(metric string, labels map[string]string, ts time.Time) string {
 // copies (duplicates). A point sent twice counts once: a resend is not a storage duplicate.
 // Stored points with no sent counterpart are ignored; they come from outside the read range.
 func Compare(sent []model.Point, stored []Stored) (missing, dups int, sample []string) {
-	have := make(map[string]bool, len(stored))
+	keys := make([]string, len(sent))
+	for i, p := range sent {
+		keys[i] = ID(p.Metric, p.Labels, p.Timestamp)
+	}
+	copies := make(map[string]uint64, len(stored))
 	for _, s := range stored {
-		have[ID(s.Metric, s.Labels, s.TS)] = true
-		if s.Copies > 1 {
-			dups += int(s.Copies - 1)
+		copies[ID(s.Metric, s.Labels, s.TS)] += s.Copies
+	}
+	return CompareKeys(keys, copies)
+}
+
+// CompareKeys is Compare over identities already turned into keys (a span's is its
+// model.Span.Key): sent is what Redpanda holds, stored maps each stored key to its copies.
+func CompareKeys(sent []string, stored map[string]uint64) (missing, dups int, sample []string) {
+	for _, c := range stored {
+		if c > 1 {
+			dups += int(c - 1)
 		}
 	}
 	seen := make(map[string]bool, len(sent))
-	for _, p := range sent {
-		k := ID(p.Metric, p.Labels, p.Timestamp)
+	for _, k := range sent {
 		if seen[k] {
 			continue
 		}
 		seen[k] = true
-		if !have[k] {
+		if stored[k] == 0 {
 			missing++
 			if len(sample) < maxSample {
 				sample = append(sample, k)
