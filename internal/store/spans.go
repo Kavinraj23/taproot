@@ -2,8 +2,11 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
+
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 
 	"taproot/internal/model"
 )
@@ -169,6 +172,96 @@ func (s *Store) storedSpanKeys(ctx context.Context, services map[string]bool, fr
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("look up stored spans: %w", err)
+	}
+	return out, nil
+}
+
+// ErrTraceNotFound means no span of the trace is stored: never seen, past the 48-hour
+// retention, or not arrived yet.
+var ErrTraceNotFound = errors.New("trace not found")
+
+const spanColumns = `trace_id, span_id, parent_span_id, service, name, kind, start, duration_ns, status, attributes, resource`
+
+// Trace returns every stored span of one trace, by start. Two reads, like a card catalogue:
+// the trace index gives the trace's time range, then only that slice of spans is searched
+// (the spans table is sorted by service and time, not by trace). Bounds are widened to whole
+// seconds: clickhouse-go binds a time.Time at second precision, so a span starting late in
+// the trace's last second would otherwise fall outside.
+func (s *Store) Trace(ctx context.Context, traceID string) ([]model.Span, error) {
+	var first, last time.Time
+	var n uint64
+	// Aggregate: the index holds one row per trace per insert until background merges.
+	if err := s.conn.QueryRow(ctx, "SELECT min(start_min), max(end_max), count() FROM "+s.traceIndexTable()+
+		" WHERE trace_id = ?", traceID).Scan(&first, &last, &n); err != nil {
+		return nil, fmt.Errorf("look up trace index: %w", err)
+	}
+	if n == 0 {
+		return nil, ErrTraceNotFound
+	}
+	lo := first.UTC().Truncate(time.Second)
+	hi := last.UTC().Truncate(time.Second).Add(time.Second)
+	rows, err := s.conn.Query(ctx, "SELECT "+spanColumns+" FROM "+s.spanTable()+
+		" WHERE start >= ? AND start < ? AND trace_id = ? ORDER BY start, span_id", lo, hi, traceID)
+	if err != nil {
+		return nil, fmt.Errorf("read trace: %w", err)
+	}
+	spans, err := scanSpans(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(spans) == 0 {
+		return nil, ErrTraceNotFound // the index outlived its spans (TTLs run separately)
+	}
+	return spans, nil
+}
+
+// TraceSummary is one line of RecentTraces: a trace, when the service first appeared in it,
+// and the name of that first span.
+type TraceSummary struct {
+	TraceID string
+	Start   time.Time
+	Name    string
+}
+
+// RecentTraces returns up to limit traces with a span of service that started in the last
+// since, newest first. It reads the spans table in its own order: service, then time.
+func (s *Store) RecentTraces(ctx context.Context, service string, since time.Duration, limit int) ([]TraceSummary, error) {
+	rows, err := s.conn.Query(ctx, "SELECT trace_id, min(start) AS first, argMin(name, start) FROM "+s.spanTable()+
+		" WHERE service = ? AND start >= now64(9) - toIntervalSecond(?)"+
+		" GROUP BY trace_id ORDER BY first DESC, trace_id LIMIT ?", service, int64(since.Seconds()), limit)
+	if err != nil {
+		return nil, fmt.Errorf("recent traces: %w", err)
+	}
+	defer rows.Close()
+	var out []TraceSummary
+	for rows.Next() {
+		var t TraceSummary
+		if err := rows.Scan(&t.TraceID, &t.Start, &t.Name); err != nil {
+			return nil, fmt.Errorf("scan recent trace: %w", err)
+		}
+		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("recent traces: %w", err)
+	}
+	return out, nil
+}
+
+func scanSpans(rows driver.Rows) ([]model.Span, error) {
+	defer rows.Close()
+	var out []model.Span
+	for rows.Next() {
+		var sp model.Span
+		var dur uint64
+		if err := rows.Scan(&sp.TraceID, &sp.SpanID, &sp.ParentSpanID, &sp.Service, &sp.Name, &sp.Kind,
+			&sp.Start, &dur, &sp.Status, &sp.Attributes, &sp.Resource); err != nil {
+			return nil, fmt.Errorf("scan span: %w", err)
+		}
+		sp.Duration = time.Duration(dur)
+		out = append(out, sp)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read spans: %w", err)
 	}
 	return out, nil
 }

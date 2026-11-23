@@ -39,9 +39,9 @@ func DecodeSpan(r *kgo.Record) (model.Span, error) {
 		return s, fmt.Errorf("decode span: %w", err)
 	}
 	switch {
-	case !hexID(s.TraceID, 32):
+	case !model.ValidTraceID(s.TraceID):
 		return s, fmt.Errorf("decode span: bad trace_id %q", s.TraceID)
-	case !hexID(s.SpanID, 16):
+	case !model.ValidSpanID(s.SpanID):
 		return s, fmt.Errorf("decode span: bad span_id %q", s.SpanID)
 	case s.Service == "":
 		return s, errors.New("decode span: empty service")
@@ -49,24 +49,6 @@ func DecodeSpan(r *kgo.Record) (model.Span, error) {
 		return s, errors.New("decode span: missing start")
 	}
 	return s, nil
-}
-
-// hexID reports whether id is n lowercase hex digits and not all zeros (W3C's invalid ID).
-func hexID(id string, n int) bool {
-	if len(id) != n {
-		return false
-	}
-	nonzero := false
-	for _, c := range id {
-		switch {
-		case c >= '1' && c <= '9', c >= 'a' && c <= 'f':
-			nonzero = true
-		case c == '0':
-		default:
-			return false
-		}
-	}
-	return nonzero
 }
 
 // Decode turns a record into a point, rejecting records that would make a meaningless row.

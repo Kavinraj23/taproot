@@ -34,3 +34,30 @@ func TestSpanEnd(t *testing.T) {
 		t.Errorf("End() = %v, want %v", got, want)
 	}
 }
+
+// ValidTraceID / ValidSpanID: the agent writes IDs as lowercase hex (M4 task 4 moved this
+// check here from the processor so the trace CLI uses the same rule).
+func TestValidIDs(t *testing.T) {
+	cases := []struct {
+		id    string
+		trace bool
+		span  bool
+	}{
+		{"4bf92f3577b34da6a3ce929d0e0e4736", true, false},
+		{"00f067aa0ba902b7", false, true},
+		{"4BF92F3577B34DA6A3CE929D0E0E4736", false, false}, // uppercase
+		{"4bf92f3577b34da6a3ce929d0e0e473", false, false},  // 31 chars
+		{"zbf92f3577b34da6a3ce929d0e0e4736", false, false}, // not hex
+		{"00000000000000000000000000000000", false, false}, // W3C's invalid trace ID
+		{"0000000000000000", false, false},                 // W3C's invalid span ID
+		{"", false, false},
+	}
+	for _, c := range cases {
+		if got := ValidTraceID(c.id); got != c.trace {
+			t.Errorf("ValidTraceID(%q) = %v, want %v", c.id, got, c.trace)
+		}
+		if got := ValidSpanID(c.id); got != c.span {
+			t.Errorf("ValidSpanID(%q) = %v, want %v", c.id, got, c.span)
+		}
+	}
+}

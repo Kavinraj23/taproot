@@ -30,3 +30,28 @@ func (s Span) Key() string { return s.TraceID + "/" + s.SpanID }
 
 // End is when the span finished.
 func (s Span) End() time.Time { return s.Start.Add(s.Duration) }
+
+// ValidTraceID reports whether id is a trace ID as Taproot stores it: 32 lowercase hex digits,
+// not all zeros (W3C's "invalid" ID).
+func ValidTraceID(id string) bool { return hexID(id, 32) }
+
+// ValidSpanID reports whether id is a span ID as Taproot stores it: 16 lowercase hex digits,
+// not all zeros.
+func ValidSpanID(id string) bool { return hexID(id, 16) }
+
+func hexID(id string, n int) bool {
+	if len(id) != n {
+		return false
+	}
+	nonzero := false
+	for _, c := range id {
+		switch {
+		case c >= '1' && c <= '9', c >= 'a' && c <= 'f':
+			nonzero = true
+		case c == '0':
+		default:
+			return false
+		}
+	}
+	return nonzero
+}
